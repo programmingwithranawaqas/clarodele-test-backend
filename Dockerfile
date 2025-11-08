@@ -16,4 +16,4 @@ ENV PORT 8080
 EXPOSE $PORT
 
 # Run the app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD exec uvicorn main:app --host 0.0.0.0 --port $PORT
