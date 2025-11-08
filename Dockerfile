@@ -4,16 +4,16 @@ FROM python:3.10-slim
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install
+# Copy requirements and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all files
+# Copy all project files
 COPY . .
 
-# Expose Cloud Run port
+# Expose the Cloud Run port
+EXPOSE 8080
 ENV PORT 8080
-EXPOSE $PORT
 
-# Run the app
-CMD exec uvicorn main:app --host 0.0.0.0 --port $PORT
+# Start Uvicorn on 0.0.0.0 and port from environment variable
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
