@@ -230,8 +230,21 @@ async def read_root():
                 <strong>POST</strong> /migrate-audio-files?limit=10 - Migrate specific number of files
             </div>
             <div class="endpoint">
+                <strong>GET</strong> /audio-files - List all migrated audio files with play URLs
+            </div>
+            <div class="endpoint">
+                <strong>GET</strong> /audio/{file_id} - Get specific audio file by ID
+            </div>
+            <div class="endpoint">
                 <strong>GET</strong> /test-gcs - Test GCS bucket access
             </div>
+
+            <h2>Audio Player</h2>
+            <button class="button" onclick="loadAudioFiles()">
+                🎵 Load Audio Files
+            </button>
+            
+            <div id="audioList"></div>
 
             <div class="loading" id="loading">
                 <p>⏳ Processing... Please wait...</p>
@@ -278,6 +291,44 @@ async def read_root():
                     const response = await fetch('/start-migration');
                     const data = await response.json();
                     showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function loadAudioFiles() {
+                showLoading();
+                try {
+                    const response = await fetch('/audio-files?limit=20');
+                    const data = await response.json();
+                    hideLoading();
+                    
+                    if (data.success && data.files && data.files.length > 0) {
+                        const audioListDiv = document.getElementById('audioList');
+                        audioListDiv.innerHTML = '<h3>📁 Audio Files (' + data.total + ' total)</h3>';
+                        
+                        data.files.forEach((file, index) => {
+                            const fileDiv = document.createElement('div');
+                            fileDiv.className = 'audio-item';
+                            fileDiv.innerHTML = `
+                                <div style="background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #4CAF50;">
+                                    <strong>File ${index + 1} (ID: ${file.id})</strong><br>
+                                    <small>Path: ${file.blob_name}</small><br>
+                                    <audio controls style="width: 100%; margin-top: 10px;">
+                                        <source src="${file.play_url}" type="audio/mpeg">
+                                        Your browser does not support the audio element.
+                                    </audio>
+                                </div>
+                            `;
+                            audioListDiv.appendChild(fileDiv);
+                        });
+                        
+                        if (data.total > data.files.length) {
+                            audioListDiv.innerHTML += `<p><em>Showing ${data.files.length} of ${data.total} files. Adjust limit parameter to see more.</em></p>`;
+                        }
+                    } else {
+                        showResult(data, !data.success);
+                    }
                 } catch (error) {
                     showResult({error: error.message}, true);
                 }
@@ -626,6 +677,170 @@ async def get_migration_status():
             "column_exists": True,
             "statistics": dict(stats)
         }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/audio-files")
+async def list_audio_files(limit: int = 50, offset: int = 0):
+    """
+    List all migrated audio files with playable URLs
+    
+    Args:
+        limit: Number of files to return (default: 50)
+        offset: Number of files to skip (default: 0)
+    
+    Returns:
+        List of audio files with signed URLs for playing
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get audio files with bucket URLs
+        cursor.execute("""
+            SELECT 
+                tarea1_set_id as id,
+                audio_url,
+                bucket_url
+            FROM listening_tarea1_set
+            WHERE bucket_url IS NOT NULL 
+            AND bucket_url != ''
+            ORDER BY tarea1_set_id
+            LIMIT %s OFFSET %s;
+        """, (limit, offset))
+        
+        files = cursor.fetchall()
+        
+        # Get total count
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM listening_tarea1_set
+            WHERE bucket_url IS NOT NULL 
+            AND bucket_url != '';
+        """)
+        total = cursor.fetchone()['total']
+        
+        cursor.close()
+        conn.close()
+        
+        # Generate signed URLs for each file
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        
+        audio_files = []
+        for file in files:
+            bucket_url = file['bucket_url']
+            
+            # Extract blob name from gs:// URL
+            if bucket_url.startswith(f"gs://{GCS_BUCKET_NAME}/"):
+                blob_name = bucket_url.replace(f"gs://{GCS_BUCKET_NAME}/", "")
+                blob = bucket.blob(blob_name)
+                
+                # Generate signed URL (valid for 1 hour)
+                signed_url = blob.generate_signed_url(
+                    version="v4",
+                    expiration=3600,  # 1 hour
+                    method="GET"
+                )
+                
+                audio_files.append({
+                    "id": file['id'],
+                    "google_drive_url": file['audio_url'],
+                    "bucket_url": bucket_url,
+                    "play_url": signed_url,
+                    "blob_name": blob_name
+                })
+        
+        return {
+            "success": True,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "count": len(audio_files),
+            "files": audio_files
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/audio/{file_id}")
+async def get_audio_file(file_id: int):
+    """
+    Get a specific audio file by ID with a playable URL
+    
+    Args:
+        file_id: The tarea1_set_id of the audio file
+    
+    Returns:
+        Audio file details with signed URL for playing
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get the specific audio file
+        cursor.execute("""
+            SELECT 
+                tarea1_set_id as id,
+                audio_url,
+                bucket_url
+            FROM listening_tarea1_set
+            WHERE tarea1_set_id = %s
+            AND bucket_url IS NOT NULL 
+            AND bucket_url != '';
+        """, (file_id,))
+        
+        file = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if not file:
+            return {
+                "success": False,
+                "error": f"Audio file with ID {file_id} not found or not migrated yet"
+            }
+        
+        bucket_url = file['bucket_url']
+        
+        # Extract blob name from gs:// URL
+        if bucket_url.startswith(f"gs://{GCS_BUCKET_NAME}/"):
+            blob_name = bucket_url.replace(f"gs://{GCS_BUCKET_NAME}/", "")
+            
+            # Generate signed URL
+            client = storage.Client()
+            bucket = client.bucket(GCS_BUCKET_NAME)
+            blob = bucket.blob(blob_name)
+            
+            signed_url = blob.generate_signed_url(
+                version="v4",
+                expiration=3600,  # 1 hour
+                method="GET"
+            )
+            
+            return {
+                "success": True,
+                "file": {
+                    "id": file['id'],
+                    "google_drive_url": file['audio_url'],
+                    "bucket_url": bucket_url,
+                    "play_url": signed_url,
+                    "blob_name": blob_name
+                }
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Invalid bucket URL format"
+            }
         
     except Exception as e:
         return {
