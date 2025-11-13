@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from google.cloud import storage
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -243,8 +243,12 @@ async def read_root():
             <button class="button" onclick="loadAudioFiles()">
                 🎵 Load Audio Files
             </button>
+            <button class="button secondary" onclick="loadBucketAudioFiles()">
+                ☁️ Load From Bucket (Direct)
+            </button>
             
             <div id="audioList"></div>
+            <div id="bucketAudioList"></div>
 
             <div class="loading" id="loading">
                 <p>⏳ Processing... Please wait...</p>
@@ -331,6 +335,42 @@ async def read_root():
                     }
                 } catch (error) {
                     showResult({error: error.message}, true);
+                }
+            }
+
+            async function loadBucketAudioFiles() {
+                showLoading();
+                try {
+                    const response = await fetch('/bucket-audio-files?prefix=listening_tarea1/&limit=20');
+                    const data = await response.json();
+                    hideLoading();
+                    const target = document.getElementById('bucketAudioList');
+                    if (!data.success) {
+                        target.innerHTML = `<div class='result error'>${JSON.stringify(data, null, 2)}</div>`;
+                        return;
+                    }
+                    target.innerHTML = `<h3>🗂️ Bucket Objects (${data.count}/${data.limit} shown)</h3>`;
+                    if (data.files.length === 0) {
+                        target.innerHTML += '<p><em>No objects found under given prefix.</em></p>';
+                    } else {
+                        data.files.forEach((file, idx) => {
+                            const div = document.createElement('div');
+                            div.className = 'bucket-audio-item';
+                            const playable = file.play_url ? `<audio controls style='width:100%;margin-top:8px'><source src='${file.play_url}' type='audio/mpeg'></audio>` : `<p style='color:#d9534f'><em>No signed URL (viewer role only). Use /bucket-audio/${file.blob_name} to stream via backend.</em></p><audio controls style='width:100%;margin-top:8px'><source src='/bucket-audio/${file.blob_name}' type='audio/mpeg'></audio>`;
+                            div.innerHTML = `
+                                <div style='background:#f9f9f9;padding:12px;margin:8px 0;border-radius:5px;border-left:4px solid #2196F3;'>
+                                    <strong>Object ${idx + 1}</strong><br>
+                                    <small>${file.blob_name}</small><br>
+                                    <small>Size: ${file.size} bytes</small><br>
+                                    ${playable}
+                                </div>
+                            `;
+                            target.appendChild(div);
+                        });
+                    }
+                } catch (error) {
+                    hideLoading();
+                    document.getElementById('bucketAudioList').innerHTML = `<div class='result error'>${error.message}</div>`;
                 }
             }
 
@@ -847,4 +887,103 @@ async def get_audio_file(file_id: int):
             "success": False,
             "error": str(e)
         }
+
+
+# ----------------------------------------------------------
+# 📂 List & Stream Audio Directly From Bucket (No DB Needed)
+# ----------------------------------------------------------
+@app.get("/bucket-audio-files")
+async def list_bucket_audio_files(prefix: str = "", limit: int = 50):
+    """
+    List audio objects directly from the GCS bucket.
+
+    Args:
+        prefix: Optional path prefix to filter objects (e.g. 'listening_tarea1/')
+        limit: Max number of objects to return
+
+    Returns:
+        Metadata for objects plus signed URL if credentials allow signing.
+
+    Notes:
+        - Requires at least storage.objects.list permission.
+        - Signed URL generation needs a service account with signBlob ability. If
+          you only have *viewer* rights via a user credential, signed URL may fail.
+        - If signing fails, play_url will be omitted; consider making objects public
+          or using a service account key JSON.
+    """
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET_NAME)
+
+        blobs_iter = bucket.list_blobs(prefix=prefix)
+        items = []
+        count = 0
+        for blob in blobs_iter:
+            if count >= limit:
+                break
+            # Attempt to generate signed URL (best effort)
+            play_url = None
+            try:
+                play_url = blob.generate_signed_url(version="v4", expiration=3600, method="GET")
+            except Exception as signing_err:
+                # Silently ignore signing error; user may only have viewer role
+                play_url = None
+
+            items.append({
+                "blob_name": blob.name,
+                "size": blob.size,
+                "updated": blob.updated.isoformat() if blob.updated else None,
+                "content_type": blob.content_type,
+                "crc32c": blob.crc32c,
+                "md5_hash": blob.md5_hash,
+                "storage_class": blob.storage_class,
+                "gcs_uri": f"gs://{GCS_BUCKET_NAME}/{blob.name}",
+                "play_url": play_url
+            })
+            count += 1
+
+        return {
+            "success": True,
+            "bucket": GCS_BUCKET_NAME,
+            "prefix": prefix,
+            "limit": limit,
+            "count": len(items),
+            "files": items
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/bucket-audio/{blob_path:path}")
+async def stream_bucket_audio(blob_path: str):
+    """
+    Stream an audio object directly from GCS without relying on DB.
+
+    Args:
+        blob_path: Path of the object inside the bucket (e.g. 'listening_tarea1/123.mp3')
+
+    Returns:
+        StreamingResponse with audio content.
+
+    Permissions:
+        - Requires storage.objects.get.
+        - Efficient for small/medium files (< ~10MB). For very large files you
+          might prefer signed URLs to let the client download directly.
+    """
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_path)
+
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="Blob not found in bucket")
+
+        # Download as bytes (could stream in chunks if very large)
+        data = blob.download_as_bytes()
+        content_type = blob.content_type or "audio/mpeg"
+        return StreamingResponse(iter([data]), media_type=content_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
