@@ -130,7 +130,7 @@ def update_bucket_url(conn, row_id: int, bucket_url: str):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            f"UPDATE {TABLE_NAME} SET {BUCKET_URL_COLUMN} = %s WHERE id = %s",
+            f"UPDATE {TABLE_NAME} SET {BUCKET_URL_COLUMN} = %s WHERE tarea1_set_id = %s",
             (bucket_url, row_id)
         )
         conn.commit()
@@ -210,11 +210,11 @@ def migrate_audio_files(limit: Optional[int] = None, test_mode: bool = False):
         # Fetch rows that need migration
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         query = f"""
-            SELECT id, {AUDIO_URL_COLUMN}, {BUCKET_URL_COLUMN}
+            SELECT tarea1_set_id as id, {AUDIO_URL_COLUMN}, {BUCKET_URL_COLUMN}
             FROM {TABLE_NAME} 
             WHERE {AUDIO_URL_COLUMN} IS NOT NULL 
             AND ({BUCKET_URL_COLUMN} IS NULL OR {BUCKET_URL_COLUMN} = '')
-            ORDER BY id
+            ORDER BY tarea1_set_id
         """
         
         if limit:

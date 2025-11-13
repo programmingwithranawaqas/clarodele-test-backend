@@ -104,7 +104,7 @@ def update_bucket_url(conn, row_id: int, bucket_url: str):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "UPDATE listening_tarea1_set SET bucket_url = %s WHERE id = %s",
+            "UPDATE listening_tarea1_set SET bucket_url = %s WHERE tarea1_set_id = %s",
             (bucket_url, row_id)
         )
         conn.commit()
@@ -370,7 +370,7 @@ async def migrate_audio_files(limit: Optional[int] = None, test_mode: bool = Fal
         
         # Fetch rows that need migration
         query = """
-            SELECT id, audio_url, bucket_url 
+            SELECT tarea1_set_id as id, audio_url, bucket_url 
             FROM listening_tarea1_set 
             WHERE audio_url IS NOT NULL 
             AND (bucket_url IS NULL OR bucket_url = '')

@@ -73,7 +73,7 @@ def main():
         print("4. Checking for required columns...")
         column_names = [col['column_name'] for col in columns]
         
-        required_columns = ['id', 'audio_url']
+        required_columns = ['tarea1_set_id', 'audio_url']
         for req_col in required_columns:
             if req_col in column_names:
                 print(f"   ✓ '{req_col}' column exists")
@@ -127,7 +127,7 @@ def main():
         # Show sample data
         print("7. Sample data (first 3 rows with audio_url)...")
         cursor.execute(f"""
-            SELECT id, 
+            SELECT tarea1_set_id as id, 
                    SUBSTRING(audio_url, 1, 60) as audio_url_preview,
                    {'SUBSTRING(bucket_url, 1, 60) as bucket_url_preview' if 'bucket_url' in column_names else "'' as bucket_url_preview"}
             FROM {TABLE_NAME}
