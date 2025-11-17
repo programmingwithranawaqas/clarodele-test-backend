@@ -99,14 +99,12 @@ def upload_to_gcs(local_file_path: str, destination_blob_name: str) -> Optional[
         return None
 
 
-def update_bucket_url(conn, row_id: int, bucket_url: str):
+def update_bucket_url(conn, row_id: int, bucket_url: str, table_name: str = "listening_tarea1_set", id_column: str = "tarea1_set_id"):
     """Update the bucket_url column for a specific row"""
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "UPDATE listening_tarea1_set SET bucket_url = %s WHERE tarea1_set_id = %s",
-            (bucket_url, row_id)
-        )
+        query = f"UPDATE {table_name} SET bucket_url = %s WHERE {id_column} = %s"
+        cursor.execute(query, (bucket_url, row_id))
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -215,7 +213,11 @@ async def read_root():
             </a>
             
             <a href="#" class="button secondary" onclick="startMigration(); return false;">
-                🚀 Start Auto-Migration
+                🚀 Start Auto-Migration (Tarea1)
+            </a>
+            
+            <a href="#" class="button secondary" onclick="startMigrationTarea2(); return false;">
+                🚀 Start Auto-Migration (Tarea2)
             </a>
 
             <h2>Available Endpoints</h2>
@@ -224,10 +226,16 @@ async def read_root():
                 <strong>GET</strong> /migration-status - Check current migration status
             </div>
             <div class="endpoint">
-                <strong>GET</strong> /start-migration - ⭐ Start automatic migration of all files
+                <strong>GET</strong> /start-migration - ⭐ Start automatic migration of all tarea1 files
             </div>
             <div class="endpoint">
-                <strong>POST</strong> /migrate-audio-files?limit=10 - Migrate specific number of files
+                <strong>POST</strong> /migrate-audio-files?limit=10 - Migrate specific number of tarea1 files
+            </div>
+            <div class="endpoint">
+                <strong>GET</strong> /start-migration-tarea2 - ⭐ Start automatic migration of all tarea2 files
+            </div>
+            <div class="endpoint">
+                <strong>POST</strong> /migrate-audio-files-tarea2?limit=10 - Migrate specific number of tarea2 files
             </div>
             <div class="endpoint">
                 <strong>GET</strong> /audio-files - List all migrated audio files with play URLs
@@ -286,13 +294,28 @@ async def read_root():
             }
 
             async function startMigration() {
-                if (!confirm('Start automatic migration of all pending files?\\n\\nThis will migrate all files in batches of 10.')) {
+                if (!confirm('Start automatic migration of all pending TAREA1 files?\\n\\nThis will migrate all files in batches of 10.')) {
                     return;
                 }
                 
                 showLoading();
                 try {
                     const response = await fetch('/start-migration');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function startMigrationTarea2() {
+                if (!confirm('Start automatic migration of all pending TAREA2 files?\\n\\nThis will migrate all files in batches of 10.')) {
+                    return;
+                }
+                
+                showLoading();
+                try {
+                    const response = await fetch('/start-migration-tarea2');
                     const data = await response.json();
                     showResult(data);
                 } catch (error) {
@@ -525,7 +548,7 @@ async def migrate_audio_files(limit: Optional[int] = None, test_mode: bool = Fal
                     
                     # Update database
                     if not test_mode:
-                        update_bucket_url(conn, row_id, bucket_url)
+                        update_bucket_url(conn, row_id, bucket_url, "listening_tarea1_set", "tarea1_set_id")
                         print(f"Updated row {row_id} with bucket URL: {bucket_url}")
                     else:
                         print(f"[TEST MODE] Would update row {row_id} with: {bucket_url}")
@@ -674,49 +697,340 @@ async def start_auto_migration():
         }
 
 
-@app.get("/migration-status")
-async def get_migration_status():
+# ----------------------------------------------------------
+# 🔄 Migrate Audio Files for Tarea2 Table
+# ----------------------------------------------------------
+@app.post("/migrate-audio-files-tarea2")
+async def migrate_audio_files_tarea2(limit: Optional[int] = None, test_mode: bool = False):
     """
-    Check the migration status of audio files
+    Migrate audio files from Google Drive to GCS bucket for listening_tarea2_set table
+    
+    Args:
+        limit: Number of rows to process (None = all rows)
+        test_mode: If True, only process rows without committing to database
+    
+    Returns:
+        Migration results with success/failure counts
+    """
+    conn = None
+    results = {
+        "total_rows": 0,
+        "successful": 0,
+        "failed": 0,
+        "skipped": 0,
+        "errors": []
+    }
+    
+    try:
+        # Connect to database
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # First, check if bucket_url column exists, if not create it
+        try:
+            cursor.execute("""
+                ALTER TABLE listening_tarea2_set 
+                ADD COLUMN IF NOT EXISTS bucket_url TEXT;
+            """)
+            conn.commit()
+        except Exception as e:
+            print(f"Column might already exist: {e}")
+            conn.rollback()
+        
+        # Fetch rows that need migration
+        query = """
+            SELECT tarea2_set_id as id, audio_url, bucket_url 
+            FROM listening_tarea2_set 
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL OR bucket_url = '')
+        """
+        
+        if limit:
+            query += f" LIMIT {limit}"
+        
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        results["total_rows"] = len(rows)
+        
+        print(f"Found {len(rows)} rows to process in listening_tarea2_set")
+        
+        # Process each row
+        for row in rows:
+            row_id = row['id']
+            audio_url = row['audio_url']
+            
+            try:
+                # Extract Google Drive file ID
+                file_id = extract_google_drive_id(audio_url)
+                if not file_id:
+                    results["failed"] += 1
+                    results["errors"].append({
+                        "row_id": row_id,
+                        "error": "Could not extract Google Drive file ID",
+                        "url": audio_url
+                    })
+                    continue
+                
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                    tmp_file_path = tmp_file.name
+                
+                try:
+                    # Download from Google Drive
+                    print(f"Downloading file {file_id} for tarea2 row {row_id}...")
+                    if not download_from_google_drive(file_id, tmp_file_path):
+                        results["failed"] += 1
+                        results["errors"].append({
+                            "row_id": row_id,
+                            "error": "Failed to download from Google Drive",
+                            "file_id": file_id
+                        })
+                        continue
+                    
+                    # Upload to GCS with organized path
+                    destination_blob_name = f"listening_tarea2/{file_id}.mp3"
+                    print(f"Uploading to GCS: {destination_blob_name}...")
+                    bucket_url = upload_to_gcs(tmp_file_path, destination_blob_name)
+                    
+                    if not bucket_url:
+                        results["failed"] += 1
+                        results["errors"].append({
+                            "row_id": row_id,
+                            "error": "Failed to upload to GCS",
+                            "file_id": file_id
+                        })
+                        continue
+                    
+                    # Update database
+                    if not test_mode:
+                        update_bucket_url(conn, row_id, bucket_url, "listening_tarea2_set", "tarea2_set_id")
+                        print(f"Updated tarea2 row {row_id} with bucket URL: {bucket_url}")
+                    else:
+                        print(f"[TEST MODE] Would update tarea2 row {row_id} with: {bucket_url}")
+                    
+                    results["successful"] += 1
+                    
+                finally:
+                    # Clean up temporary file
+                    if os.path.exists(tmp_file_path):
+                        os.unlink(tmp_file_path)
+                
+            except Exception as e:
+                results["failed"] += 1
+                results["errors"].append({
+                    "row_id": row_id,
+                    "error": str(e),
+                    "url": audio_url
+                })
+                print(f"Error processing tarea2 row {row_id}: {str(e)}")
+        
+        cursor.close()
+        
+        return {
+            "success": True,
+            "message": "Migration completed for listening_tarea2_set",
+            "results": results,
+            "test_mode": test_mode
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "results": results
+        }
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.get("/start-migration-tarea2")
+async def start_auto_migration_tarea2():
+    """
+    🚀 AUTO-MIGRATION ENDPOINT FOR TAREA2
+    
+    This endpoint automatically migrates all pending audio files in batches.
+    Just visit this URL and it will handle everything!
+    
+    It will:
+    1. Check current migration status
+    2. Migrate all pending files in batches of 10
+    3. Return final statistics
+    
+    Safe to run multiple times - skips already migrated files.
     """
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Check if column exists
-        cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='listening_tarea1_set' 
-            AND column_name='bucket_url';
-        """)
-        column_exists = cursor.fetchone() is not None
+        # Ensure column exists
+        try:
+            cursor.execute("""
+                ALTER TABLE listening_tarea2_set 
+                ADD COLUMN IF NOT EXISTS bucket_url TEXT;
+            """)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
         
-        if not column_exists:
-            return {
-                "column_exists": False,
-                "message": "bucket_url column does not exist yet"
-            }
-        
-        # Get statistics
+        # Get initial stats
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_rows,
                 COUNT(audio_url) as rows_with_audio_url,
                 COUNT(bucket_url) as rows_with_bucket_url,
                 COUNT(CASE WHEN audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '') THEN 1 END) as pending_migration
-            FROM listening_tarea1_set;
+            FROM listening_tarea2_set;
         """)
+        initial_stats = dict(cursor.fetchone())
         
-        stats = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        # If nothing to migrate
+        if initial_stats['pending_migration'] == 0:
+            return {
+                "success": True,
+                "message": "✅ All tarea2 files already migrated!",
+                "statistics": initial_stats,
+                "migrated_in_this_run": 0
+            }
+        
+        # Migrate all pending files (batch size: 10)
+        BATCH_SIZE = 10
+        total_migrated = 0
+        all_results = []
+        
+        while True:
+            # Migrate one batch
+            result = await migrate_audio_files_tarea2(limit=BATCH_SIZE, test_mode=False)
+            
+            if not result.get("success"):
+                return {
+                    "success": False,
+                    "error": "Migration failed",
+                    "details": result,
+                    "total_migrated_before_error": total_migrated
+                }
+            
+            batch_success = result["results"]["successful"]
+            total_migrated += batch_success
+            all_results.append(result["results"])
+            
+            # If this batch had no successful migrations, we're done
+            if batch_success == 0:
+                break
+        
+        # Get final stats
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_rows,
+                COUNT(audio_url) as rows_with_audio_url,
+                COUNT(bucket_url) as rows_with_bucket_url,
+                COUNT(CASE WHEN audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '') THEN 1 END) as pending_migration
+            FROM listening_tarea2_set;
+        """)
+        final_stats = dict(cursor.fetchone())
         cursor.close()
         conn.close()
         
         return {
             "success": True,
-            "column_exists": True,
-            "statistics": dict(stats)
+            "message": f"✅ Tarea2 migration completed! Migrated {total_migrated} files.",
+            "migrated_in_this_run": total_migrated,
+            "initial_statistics": initial_stats,
+            "final_statistics": final_stats,
+            "batch_results": all_results
         }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/migration-status")
+async def get_migration_status():
+    """
+    Check the migration status of audio files for both tarea1 and tarea2 tables
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check tarea1 table
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='listening_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        tarea1_column_exists = cursor.fetchone() is not None
+        
+        # Check tarea2 table
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='listening_tarea2_set' 
+            AND column_name='bucket_url';
+        """)
+        tarea2_column_exists = cursor.fetchone() is not None
+        
+        result = {
+            "success": True,
+            "tarea1": {},
+            "tarea2": {}
+        }
+        
+        # Get tarea1 statistics
+        if tarea1_column_exists:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_rows,
+                    COUNT(audio_url) as rows_with_audio_url,
+                    COUNT(bucket_url) as rows_with_bucket_url,
+                    COUNT(CASE WHEN audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '') THEN 1 END) as pending_migration
+                FROM listening_tarea1_set;
+            """)
+            tarea1_stats = dict(cursor.fetchone())
+            result["tarea1"] = {
+                "column_exists": True,
+                "statistics": tarea1_stats
+            }
+        else:
+            result["tarea1"] = {
+                "column_exists": False,
+                "message": "bucket_url column does not exist yet"
+            }
+        
+        # Get tarea2 statistics
+        if tarea2_column_exists:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_rows,
+                    COUNT(audio_url) as rows_with_audio_url,
+                    COUNT(bucket_url) as rows_with_bucket_url,
+                    COUNT(CASE WHEN audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '') THEN 1 END) as pending_migration
+                FROM listening_tarea2_set;
+            """)
+            tarea2_stats = dict(cursor.fetchone())
+            result["tarea2"] = {
+                "column_exists": True,
+                "statistics": tarea2_stats
+            }
+        else:
+            result["tarea2"] = {
+                "column_exists": False,
+                "message": "bucket_url column does not exist yet"
+            }
+        
+        cursor.close()
+        conn.close()
+        
+        return result
         
     except Exception as e:
         return {
