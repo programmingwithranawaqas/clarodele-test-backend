@@ -1572,11 +1572,18 @@ async def migrate_audio_files_tarea5(limit: Optional[int] = None, test_mode: boo
             conn.rollback()
         
         # Fetch rows that need migration
+        # Include rows where bucket_url is NULL, empty, or contains Google Drive links
         query = """
             SELECT tarea5_set_id as id, audio_url, bucket_url 
             FROM listening_tarea5_set 
             WHERE audio_url IS NOT NULL 
-            AND (bucket_url IS NULL OR bucket_url = '')
+            AND (
+                bucket_url IS NULL 
+                OR bucket_url = '' 
+                OR bucket_url LIKE '%drive.google.com%'
+                OR bucket_url LIKE '%docs.google.com%'
+                OR bucket_url NOT LIKE 'gs://%'
+            )
         """
         
         if limit:
@@ -1712,8 +1719,14 @@ async def start_auto_migration_tarea5():
             SELECT 
                 COUNT(*) as total_rows,
                 COUNT(audio_url) as rows_with_audio_url,
-                COUNT(bucket_url) as rows_with_bucket_url,
-                COUNT(CASE WHEN audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '') THEN 1 END) as pending_migration
+                COUNT(CASE WHEN bucket_url IS NOT NULL AND bucket_url LIKE 'gs://%' THEN 1 END) as rows_with_bucket_url,
+                COUNT(CASE WHEN audio_url IS NOT NULL AND (
+                    bucket_url IS NULL 
+                    OR bucket_url = '' 
+                    OR bucket_url LIKE '%drive.google.com%'
+                    OR bucket_url LIKE '%docs.google.com%'
+                    OR bucket_url NOT LIKE 'gs://%'
+                ) THEN 1 END) as pending_migration
             FROM listening_tarea5_set;
         """)
         initial_stats = dict(cursor.fetchone())
@@ -1762,8 +1775,14 @@ async def start_auto_migration_tarea5():
             SELECT 
                 COUNT(*) as total_rows,
                 COUNT(audio_url) as rows_with_audio_url,
-                COUNT(bucket_url) as rows_with_bucket_url,
-                COUNT(CASE WHEN audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '') THEN 1 END) as pending_migration
+                COUNT(CASE WHEN bucket_url IS NOT NULL AND bucket_url LIKE 'gs://%' THEN 1 END) as rows_with_bucket_url,
+                COUNT(CASE WHEN audio_url IS NOT NULL AND (
+                    bucket_url IS NULL 
+                    OR bucket_url = '' 
+                    OR bucket_url LIKE '%drive.google.com%'
+                    OR bucket_url LIKE '%docs.google.com%'
+                    OR bucket_url NOT LIKE 'gs://%'
+                ) THEN 1 END) as pending_migration
             FROM listening_tarea5_set;
         """)
         final_stats = dict(cursor.fetchone())
@@ -1939,8 +1958,14 @@ async def get_migration_status():
                 SELECT 
                     COUNT(*) as total_rows,
                     COUNT(audio_url) as rows_with_audio_url,
-                    COUNT(bucket_url) as rows_with_bucket_url,
-                    COUNT(CASE WHEN audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '') THEN 1 END) as pending_migration
+                    COUNT(CASE WHEN bucket_url IS NOT NULL AND bucket_url LIKE 'gs://%' THEN 1 END) as rows_with_bucket_url,
+                    COUNT(CASE WHEN audio_url IS NOT NULL AND (
+                        bucket_url IS NULL 
+                        OR bucket_url = '' 
+                        OR bucket_url LIKE '%drive.google.com%'
+                        OR bucket_url LIKE '%docs.google.com%'
+                        OR bucket_url NOT LIKE 'gs://%'
+                    ) THEN 1 END) as pending_migration
                 FROM listening_tarea5_set;
             """)
             tarea5_stats = dict(cursor.fetchone())
