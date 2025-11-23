@@ -242,6 +242,10 @@ async def read_root():
                 🔄 Recreate Tables & Parse All Documents
             </a>
             
+            <a href="#" class="button secondary" onclick="addBucketUrlColumn(); return false;">
+                ➕ Add bucket_url Column (if missing)
+            </a>
+            
             <a href="#" class="button secondary" onclick="startMigrationWritingTarea1(); return false;">
                 🚀 Start Audio Migration (Writing Tarea1)
             </a>
@@ -426,6 +430,23 @@ async def read_root():
                 showLoading();
                 try {
                     const response = await fetch('/start-migration-writing-tarea1');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function addBucketUrlColumn() {
+                if (!confirm('Add bucket_url column to writing_tarea1_set table?\\n\\nThis is safe to run multiple times.')) {
+                    return;
+                }
+                
+                showLoading();
+                try {
+                    const response = await fetch('/add-bucket-url-column-writing-tarea1', {
+                        method: 'POST'
+                    });
                     const data = await response.json();
                     showResult(data);
                 } catch (error) {
@@ -2713,6 +2734,65 @@ async def recreate_and_parse_writing_tarea1():
         }
 
 
+@app.post("/add-bucket-url-column-writing-tarea1")
+async def add_bucket_url_column_writing_tarea1():
+    """
+    Add bucket_url column to writing_tarea1_set table if it doesn't exist.
+    Safe to run multiple times.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        
+        column_exists = cursor.fetchone() is not None
+        
+        if column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": True,
+                "message": "bucket_url column already exists",
+                "action": "none"
+            }
+        
+        # Add the column
+        cursor.execute("""
+            ALTER TABLE writing_tarea1_set 
+            ADD COLUMN bucket_url TEXT;
+        """)
+        
+        cursor.execute("""
+            COMMENT ON COLUMN writing_tarea1_set.bucket_url 
+            IS 'Google Cloud Storage bucket URL after migration (gs://...)';
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "message": "bucket_url column added successfully",
+            "action": "added"
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
 @app.get("/writing-tarea1-status")
 async def get_writing_tarea1_status():
     """Get status of Writing Tarea 1 parsing and audio migration"""
@@ -2729,18 +2809,41 @@ async def get_writing_tarea1_status():
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
+        # Check if bucket_url column exists
         cursor.execute("""
-            SELECT 
-                COUNT(*) as total_records,
-                COUNT(situation) as with_situation,
-                COUNT(task_instructions) as with_task,
-                COUNT(audio_url) as with_audio_url,
-                COUNT(bucket_url) as with_bucket_url,
-                COUNT(CASE WHEN audio_url IS NOT NULL AND bucket_url IS NULL THEN 1 END) as pending_migration
-            FROM writing_tarea1_set;
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea1_set' 
+            AND column_name='bucket_url';
         """)
         
+        bucket_url_exists = cursor.fetchone() is not None
+        
+        if bucket_url_exists:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_records,
+                    COUNT(situation) as with_situation,
+                    COUNT(task_instructions) as with_task,
+                    COUNT(audio_url) as with_audio_url,
+                    COUNT(bucket_url) as with_bucket_url,
+                    COUNT(CASE WHEN audio_url IS NOT NULL AND bucket_url IS NULL THEN 1 END) as pending_migration
+                FROM writing_tarea1_set;
+            """)
+        else:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_records,
+                    COUNT(situation) as with_situation,
+                    COUNT(task_instructions) as with_task,
+                    COUNT(audio_url) as with_audio_url,
+                    0 as with_bucket_url,
+                    COUNT(audio_url) as pending_migration
+                FROM writing_tarea1_set;
+            """)
+        
         db_stats = dict(cursor.fetchone())
+        db_stats['bucket_url_column_exists'] = bucket_url_exists
         
         cursor.execute("""
             SELECT COUNT(*) as with_solution
@@ -2864,9 +2967,11 @@ async def migrate_audio_files_writing_tarea1(batch_size: int = 10):
         }
         
     except Exception as e:
+        import traceback
         return {
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "traceback": traceback.format_exc()
         }
 
 
@@ -2880,6 +2985,24 @@ async def start_auto_migration_writing_tarea1():
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
+        # Check if bucket_url column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        
+        column_exists = cursor.fetchone() is not None
+        
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-writing-tarea1 first or recreate the tables."
+            }
+        
         # Count total files to migrate
         cursor.execute("""
             SELECT COUNT(*) as total
@@ -2891,7 +3014,16 @@ async def start_auto_migration_writing_tarea1():
                  OR bucket_url NOT LIKE 'gs://%');
         """)
         
-        total_to_migrate = cursor.fetchone()['total']
+        result = cursor.fetchone()
+        if not result:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "No result from count query - table may not exist"
+            }
+        
+        total_to_migrate = result['total']
         cursor.close()
         conn.close()
         
@@ -2934,9 +3066,11 @@ async def start_auto_migration_writing_tarea1():
         }
         
     except Exception as e:
+        import traceback
         return {
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "traceback": traceback.format_exc()
         }
 
 
