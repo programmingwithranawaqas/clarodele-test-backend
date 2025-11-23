@@ -238,6 +238,10 @@ async def read_root():
                 📊 Check Writing Tarea 1 Status
             </a>
             
+            <a href="#" class="button secondary" onclick="recreateAndParseWriting(); return false;">
+                🔄 Recreate Tables & Parse All Documents
+            </a>
+            
             <a href="#" class="button secondary" onclick="parseWritingTarea1(); return false;">
                 📝 Parse Writing Tarea 1 Documents
             </a>
@@ -433,6 +437,25 @@ async def read_root():
                 showLoading();
                 try {
                     const response = await fetch('/parse-writing-tarea1', {
+                        method: 'POST'
+                    });
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function recreateAndParseWriting() {
+                if (!confirm('⚠️ WARNING: This will DROP and RECREATE writing_tarea1 tables, then parse ALL 100 documents.\\n\\nAll existing data will be DELETED.\\n\\nContinue?')) {
+                    return;
+                }
+                
+                showLoading();
+                document.getElementById('result').innerHTML = '<div class="result">🔄 Recreating tables and parsing all documents... This may take a few minutes...</div>';
+                
+                try {
+                    const response = await fetch('/recreate-and-parse-writing-tarea1', {
                         method: 'POST'
                     });
                     const data = await response.json();
@@ -2586,6 +2609,57 @@ def insert_writing_tarea1_db(conn, data: dict, module_type_id: int, filename: st
         raise
     finally:
         cursor.close()
+
+
+@app.post("/recreate-and-parse-writing-tarea1")
+async def recreate_and_parse_writing_tarea1():
+    """
+    Drop existing writing_tarea1 tables, recreate them, and parse all documents.
+    This is the complete deployment endpoint.
+    """
+    try:
+        from parse_writing_tarea1 import recreate_tables, parse_all_documents
+        
+        folder_path = "Writing_Tarea_1"
+        module_type_id = 1
+        
+        if not os.path.exists(folder_path):
+            return {
+                "success": False,
+                "error": f"Folder '{folder_path}' not found"
+            }
+        
+        # Step 1: Recreate tables
+        conn = get_db_connection()
+        recreate_tables(conn)
+        conn.close()
+        
+        # Step 2: Parse and insert all documents
+        results = parse_all_documents(
+            folder_path=folder_path,
+            module_type_id=module_type_id,
+            limit=None,  # Process all files
+            dry_run=False  # Insert into database
+        )
+        
+        return {
+            "success": True,
+            "message": "Tables recreated and all documents parsed",
+            "results": {
+                "total": results['total'],
+                "successful": results['successful'],
+                "failed": results['failed'],
+                "errors": results['errors'][:10] if results['errors'] else []
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 @app.get("/writing-tarea1-status")

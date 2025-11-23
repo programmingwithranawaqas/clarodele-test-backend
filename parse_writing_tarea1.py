@@ -29,6 +29,64 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 
+def recreate_tables(conn):
+    """Drop and recreate writing_tarea1 tables from schema"""
+    cur = conn.cursor()
+    
+    print("\n" + "="*80)
+    print("RECREATING DATABASE TABLES")
+    print("="*80)
+    
+    # Drop existing tables
+    print("\n📋 Dropping existing tables...")
+    cur.execute('DROP TABLE IF EXISTS writing_tarea1_solution CASCADE;')
+    print('  ✓ Dropped writing_tarea1_solution')
+    
+    cur.execute('DROP TABLE IF EXISTS writing_tarea1_set CASCADE;')
+    print('  ✓ Dropped writing_tarea1_set')
+    
+    conn.commit()
+    
+    # Recreate from schema file
+    print("\n📋 Creating new tables from schema...")
+    schema_path = 'writing_tarea1_schema.sql'
+    
+    if not os.path.exists(schema_path):
+        print(f"❌ Schema file not found: {schema_path}")
+        raise FileNotFoundError(f"Schema file {schema_path} not found")
+    
+    with open(schema_path, 'r') as f:
+        schema_sql = f.read()
+    
+    cur.execute(schema_sql)
+    print('  ✓ Created writing_tarea1_set table')
+    print('  ✓ Created writing_tarea1_solution table')
+    print('  ✓ Created indices')
+    print('  ✓ Added column comments')
+    
+    conn.commit()
+    
+    # Verify tables
+    cur.execute("""
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name LIKE 'writing_tarea1%'
+        ORDER BY table_name;
+    """)
+    tables = cur.fetchall()
+    
+    print("\n📊 Verifying tables:")
+    for table in tables:
+        cur.execute(f'SELECT COUNT(*) FROM {table[0]};')
+        count = cur.fetchone()[0]
+        print(f'  ✓ {table[0]}: {count} rows')
+    
+    cur.close()
+    print("\n✅ Tables successfully recreated!\n")
+    print("="*80)
+
+
 def extract_all_text_from_docx(docx_path: str) -> str:
     """
     Extract ALL text from a .docx file including paragraphs, tables, headers, footers.
@@ -197,15 +255,48 @@ def parse_writing_tarea1_document(docx_path: str) -> Dict:
         if reminder_lines:
             reminders = '\n'.join(reminder_lines).strip()
 
-    # Audio URL: detect first plausible URL line
+    # Audio URL: detect first plausible URL line and REMOVE it from sections
     audio_url = None
-    url_regex = re.compile(r'https?://\S+|gs://\S+|https?://drive\.google\.com/\S+', re.IGNORECASE)
-    for ln in lines:
-        if url_regex.search(ln):
-            # Accept only if looks like drive or audio file or bucket
+    audio_url_line_idx = None
+    url_regex = re.compile(r'https?://\S+|gs://\S+', re.IGNORECASE)
+    
+    for idx, ln in enumerate(lines):
+        # Check if line contains "Audio_url" or similar marker
+        if re.search(r'Audio[_\s]*url', ln, flags=re.IGNORECASE):
+            # Extract URL from this line or next line
+            url_match = url_regex.search(ln)
+            if url_match:
+                audio_url = url_match.group(0)
+                audio_url_line_idx = idx
+                break
+            # Check next line
+            elif idx + 1 < len(lines):
+                url_match = url_regex.search(lines[idx + 1])
+                if url_match:
+                    audio_url = url_match.group(0)
+                    audio_url_line_idx = idx + 1
+                    break
+        # Otherwise check if line contains drive/gs URL
+        elif url_regex.search(ln):
             if any(ext in ln.lower() for ext in ['.mp3', '.wav', 'drive.google', 'docs.google', 'gs://']):
                 audio_url = url_regex.search(ln).group(0)
+                audio_url_line_idx = idx
                 break
+    
+    # Remove audio URL line from all sections to prevent contamination
+    if audio_url and audio_url_line_idx is not None:
+        audio_line_text = lines[audio_url_line_idx]
+        for section_key in ['situation', 'task', 'solution', 'reminders']:
+            if sections[section_key]:
+                # Remove the audio URL line and "Audio_url" marker line
+                sections[section_key] = re.sub(
+                    r'Audio[_\s]*url\s*\n?',
+                    '',
+                    sections[section_key],
+                    flags=re.IGNORECASE
+                )
+                sections[section_key] = sections[section_key].replace(audio_line_text, '')
+                sections[section_key] = sections[section_key].strip()
 
     # Title: choose first non-heading, non-metadata medium-length line near top
     title = None
@@ -213,7 +304,7 @@ def parse_writing_tarea1_document(docx_path: str) -> Dict:
         normalized = re.sub(r'[:\s]+$', '', ln)
         if any(re.search(p, ln) for pats in heading_patterns.values() for p in pats):
             continue
-        if re.search(r'^(Tipo|Registro|Recuerde)', ln, flags=re.IGNORECASE):
+        if re.search(r'^(Tipo|Registro|Recuerde|Audio)', ln, flags=re.IGNORECASE):
             continue
         if 5 <= len(normalized) <= 90:
             title = ln.strip()
@@ -433,6 +524,11 @@ def main():
         action="store_true",
         help="Parse documents but don't insert into database"
     )
+    parser.add_argument(
+        "--recreate-tables",
+        action="store_true",
+        help="Drop and recreate database tables before parsing"
+    )
     
     args = parser.parse_args()
     
@@ -443,11 +539,22 @@ def main():
     print(f"Module Type ID: {args.module_type_id}")
     print(f"Limit: {args.limit if args.limit else 'No limit'}")
     print(f"Dry Run: {args.dry_run}")
+    print(f"Recreate Tables: {args.recreate_tables}")
     print("=" * 80)
     
     if not os.path.exists(args.folder):
         print(f"❌ Error: Folder '{args.folder}' not found!")
         return
+    
+    # Recreate tables if requested
+    if args.recreate_tables and not args.dry_run:
+        try:
+            conn = get_db_connection()
+            recreate_tables(conn)
+            conn.close()
+        except Exception as e:
+            print(f"❌ Failed to recreate tables: {str(e)}")
+            return
     
     parse_all_documents(
         folder_path=args.folder,
