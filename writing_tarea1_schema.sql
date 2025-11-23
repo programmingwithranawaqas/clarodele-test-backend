@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS public.writing_tarea1_set (
   reminders TEXT,                    -- "Recuerde: ..."
   audio_url TEXT,                    -- optional audio material
   module_type_id INT NOT NULL
-      REFERENCES public.module_type(id),
+      REFERENCES public.module_type(module_type_id),
   created_at TIMESTAMP DEFAULT NOW()
 );
 
