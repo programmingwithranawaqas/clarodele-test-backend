@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS public.writing_tarea1_set (
   text_type TEXT,                    -- example: "Informe formal"
   register TEXT,                     -- example: "formal"
   reminders TEXT,                    -- "Recuerde: ..."
-  audio_url TEXT,                    -- optional audio material
+  audio_url TEXT,                    -- optional audio material (Google Drive URL)
+  bucket_url TEXT,                   -- GCS bucket URL (gs://clarodele-mvp-content/...)
   module_type_id INT NOT NULL
       REFERENCES public.module_type(module_type_id),
   created_at TIMESTAMP DEFAULT NOW()
@@ -46,4 +47,5 @@ COMMENT ON COLUMN public.writing_tarea1_set.text_type IS 'Type of text to write 
 COMMENT ON COLUMN public.writing_tarea1_set.register IS 'Language register (e.g., "formal", "informal")';
 COMMENT ON COLUMN public.writing_tarea1_set.reminders IS 'Special reminders or notes for the task';
 COMMENT ON COLUMN public.writing_tarea1_set.audio_url IS 'Optional URL to audio material (Google Drive or GCS bucket)';
+COMMENT ON COLUMN public.writing_tarea1_set.bucket_url IS 'Google Cloud Storage bucket URL after migration (gs://...)';
 COMMENT ON COLUMN public.writing_tarea1_solution.solution_text IS 'Complete model answer text';

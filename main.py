@@ -242,8 +242,8 @@ async def read_root():
                 🔄 Recreate Tables & Parse All Documents
             </a>
             
-            <a href="#" class="button secondary" onclick="parseWritingTarea1(); return false;">
-                📝 Parse Writing Tarea 1 Documents
+            <a href="#" class="button secondary" onclick="startMigrationWritingTarea1(); return false;">
+                🚀 Start Audio Migration (Writing Tarea1)
             </a>
 
             <h2>Available Endpoints</h2>
@@ -413,6 +413,25 @@ async def read_root():
                     const response = await fetch('/start-migration-tarea5');
                     const data = await response.json();
                     showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function startMigrationWritingTarea1() {
+                if (!confirm('Start automatic migration of all Writing Tarea 1 audio files?\\n\\nThis will migrate audio from Google Drive to GCS bucket.')) {
+                    return;
+                }
+                
+                showLoading();
+                try {
+                    const response = await fetch('/start-migration-writing-tarea1');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
                 } catch (error) {
                     showResult({error: error.message}, true);
                 }
@@ -1875,7 +1894,7 @@ async def start_auto_migration_tarea5():
 @app.get("/migration-status")
 async def get_migration_status():
     """
-    Check the migration status of audio files for tarea1, tarea2, tarea3, tarea4, and tarea5 tables
+    Check the migration status of audio files for all tarea tables (listening + writing)
     """
     try:
         conn = get_db_connection()
@@ -1926,13 +1945,23 @@ async def get_migration_status():
         """)
         tarea5_column_exists = cursor.fetchone() is not None
         
+        # Check writing_tarea1 table
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        writing_tarea1_column_exists = cursor.fetchone() is not None
+        
         result = {
             "success": True,
             "tarea1": {},
             "tarea2": {},
             "tarea3": {},
             "tarea4": {},
-            "tarea5": {}
+            "tarea5": {},
+            "writing_tarea1": {}
         }
         
         # Get tarea1 statistics
@@ -2042,6 +2071,32 @@ async def get_migration_status():
             }
         else:
             result["tarea5"] = {
+                "column_exists": False,
+                "message": "bucket_url column does not exist yet"
+            }
+        
+        # Get writing_tarea1 statistics
+        if writing_tarea1_column_exists:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_rows,
+                    COUNT(audio_url) as rows_with_audio_url,
+                    COUNT(CASE WHEN bucket_url IS NOT NULL AND bucket_url LIKE 'gs://%' THEN 1 END) as rows_with_bucket_url,
+                    COUNT(CASE WHEN audio_url IS NOT NULL AND (
+                        bucket_url IS NULL 
+                        OR bucket_url = '' 
+                        OR bucket_url LIKE '%drive.google.com%'
+                        OR bucket_url NOT LIKE 'gs://%'
+                    ) THEN 1 END) as pending_migration
+                FROM writing_tarea1_set;
+            """)
+            writing_tarea1_stats = dict(cursor.fetchone())
+            result["writing_tarea1"] = {
+                "column_exists": True,
+                "statistics": writing_tarea1_stats
+            }
+        else:
+            result["writing_tarea1"] = {
                 "column_exists": False,
                 "message": "bucket_url column does not exist yet"
             }
@@ -2664,7 +2719,7 @@ async def recreate_and_parse_writing_tarea1():
 
 @app.get("/writing-tarea1-status")
 async def get_writing_tarea1_status():
-    """Get status of Writing Tarea 1 parsing"""
+    """Get status of Writing Tarea 1 parsing and audio migration"""
     try:
         folder_path = "Writing_Tarea_1"
         
@@ -2683,12 +2738,20 @@ async def get_writing_tarea1_status():
                 COUNT(*) as total_records,
                 COUNT(situation) as with_situation,
                 COUNT(task_instructions) as with_task,
-                COUNT(solution_text) as with_solution
-            FROM writing_tarea1_set wt
-            LEFT JOIN writing_tarea1_solution ws ON wt.tarea1_set_id = ws.tarea1_set_id;
+                COUNT(audio_url) as with_audio_url,
+                COUNT(bucket_url) as with_bucket_url,
+                COUNT(CASE WHEN audio_url IS NOT NULL AND bucket_url IS NULL THEN 1 END) as pending_migration
+            FROM writing_tarea1_set;
         """)
         
         db_stats = dict(cursor.fetchone())
+        
+        cursor.execute("""
+            SELECT COUNT(*) as with_solution
+            FROM writing_tarea1_solution;
+        """)
+        
+        db_stats['with_solution'] = cursor.fetchone()['with_solution']
         cursor.close()
         conn.close()
         
@@ -2707,4 +2770,177 @@ async def get_writing_tarea1_status():
             "success": False,
             "error": str(e)
         }
+
+
+@app.post("/migrate-audio-files-writing-tarea1")
+async def migrate_audio_files_writing_tarea1(batch_size: int = 10):
+    """
+    Migrate audio files from Google Drive to GCS bucket for Writing Tarea 1.
+    Similar to listening tarea migrations.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get records with audio_url but no bucket_url (or Drive URLs in bucket_url)
+        cursor.execute("""
+            SELECT tarea1_set_id, audio_url, bucket_url
+            FROM writing_tarea1_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE '%drive.google%' 
+                 OR bucket_url NOT LIKE 'gs://%')
+            LIMIT %s;
+        """, (batch_size,))
+        
+        records = cursor.fetchall()
+        
+        if not records:
+            cursor.close()
+            conn.close()
+            return {
+                "success": True,
+                "message": "No files to migrate",
+                "migrated": 0,
+                "failed": 0
+            }
+        
+        migrated = 0
+        failed = 0
+        errors = []
+        
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        
+        for record in records:
+            tarea1_set_id = record['tarea1_set_id']
+            audio_url = record['audio_url']
+            
+            try:
+                # Download from Google Drive
+                file_id = extract_google_drive_id(audio_url)
+                if not file_id:
+                    raise Exception(f"Could not extract file ID from URL: {audio_url}")
+                
+                download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                response = requests.get(download_url, timeout=30)
+                
+                if response.status_code != 200:
+                    raise Exception(f"Failed to download: HTTP {response.status_code}")
+                
+                audio_data = response.content
+                
+                # Upload to GCS bucket
+                blob_name = f"writing_tarea1/{tarea1_set_id}.mp3"
+                blob = bucket.blob(blob_name)
+                blob.upload_from_string(audio_data, content_type='audio/mpeg')
+                
+                gcs_url = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
+                
+                # Update database
+                cursor.execute("""
+                    UPDATE writing_tarea1_set
+                    SET bucket_url = %s
+                    WHERE tarea1_set_id = %s;
+                """, (gcs_url, tarea1_set_id))
+                
+                conn.commit()
+                migrated += 1
+                
+            except Exception as e:
+                failed += 1
+                errors.append({
+                    "id": tarea1_set_id,
+                    "url": audio_url,
+                    "error": str(e)
+                })
+                conn.rollback()
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "migrated": migrated,
+            "failed": failed,
+            "errors": errors[:5]  # Return first 5 errors
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/start-migration-writing-tarea1")
+async def start_auto_migration_writing_tarea1():
+    """
+    Auto-migrate all audio files for Writing Tarea 1.
+    Processes in batches until all files are migrated.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Count total files to migrate
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM writing_tarea1_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE '%drive.google%' 
+                 OR bucket_url NOT LIKE 'gs://%');
+        """)
+        
+        total_to_migrate = cursor.fetchone()['total']
+        cursor.close()
+        conn.close()
+        
+        if total_to_migrate == 0:
+            return {
+                "success": True,
+                "message": "All audio files already migrated",
+                "total": 0,
+                "migrated": 0,
+                "failed": 0
+            }
+        
+        # Process in batches
+        total_migrated = 0
+        total_failed = 0
+        all_errors = []
+        batch_size = 10
+        
+        while True:
+            result = await migrate_audio_files_writing_tarea1(batch_size=batch_size)
+            
+            if not result.get('success'):
+                return result
+            
+            total_migrated += result.get('migrated', 0)
+            total_failed += result.get('failed', 0)
+            all_errors.extend(result.get('errors', []))
+            
+            # Break if no more files to process
+            if result.get('migrated', 0) == 0 and result.get('failed', 0) == 0:
+                break
+        
+        return {
+            "success": True,
+            "message": f"Migration completed for Writing Tarea 1",
+            "total": total_to_migrate,
+            "migrated": total_migrated,
+            "failed": total_failed,
+            "errors": all_errors[:10]  # Return first 10 errors
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 
