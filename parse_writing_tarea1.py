@@ -71,124 +71,181 @@ def extract_all_text_from_docx(docx_path: str) -> str:
 
 
 def parse_writing_tarea1_document(docx_path: str) -> Dict:
+    """Robust parsing of a Writing Tarea 1 document.
+
+    Strategy:
+    1. Extract every text-bearing element (paragraphs, tables, headers, footers) preserving order.
+    2. Identify heading markers for sections (SITUACIÓN, TAREA, SOLUCIÓN, Recuerde, etc.).
+    3. Segment text by heading indices. If some headings missing, use heuristics (e.g. first third as situation, middle as task, last as solution) while NEVER discarding text.
+    4. Extract metadata (word limit, text type, register) via regex scanning entire text, not limited to sections.
+    5. Extract reminders inside their section or lines starting with Recuerde.
+    6. Extract audio_url by finding first URL-like line referencing drive, docs, or gs:// or ending with common audio extensions.
+    7. Produce an extraction_report for debugging (line spans, counts, matched patterns).
     """
-    Parse a Writing Tarea 1 document and extract structured data.
-    Uses pattern matching to identify sections but preserves ALL text.
-    """
-    # Extract all text first
-    full_text = extract_all_text_from_docx(docx_path)
-    
-    # Initialize data structure
-    data = {
-        "title": None,
-        "situation": None,
-        "task_instructions": None,
-        "word_limit": None,
-        "text_type": None,
-        "register": None,
-        "reminders": None,
-        "audio_url": None,
-        "solution_text": None,
-        "full_raw_text": full_text  # Keep original text for verification
+
+    raw_text = extract_all_text_from_docx(docx_path)
+    lines = [ln.strip() for ln in raw_text.split('\n') if ln.strip()]
+
+    heading_patterns = {
+        'situation': [r'^SITUACI[ÓO]N\b', r'^SITUACION\b', r'^Situaci[óo]n\b'],
+        'task': [r'^TAREA\b', r'^Tarea\b', r'^INSTRUCCIONES?\b'],
+        'solution': [r'^SOLUCI[ÓO]N\b', r'^Soluci[óo]n\b', r'^Modelo de respuesta', r'^MODELO\b'],
+        'reminders': [r'^Recuerde', r'^RECUERDE', r'^Recordatorio']
     }
-    
-    # Split text into lines for processing
-    lines = full_text.split('\n')
-    
-    # Pattern recognition variables
-    current_section = None
-    section_content = []
-    
-    # Keywords that indicate section boundaries
-    situation_keywords = ['SITUACIÓN', 'Situación', 'SITUACION']
-    task_keywords = ['TAREA', 'Tarea', 'INSTRUCCIONES']
-    solution_keywords = ['SOLUCIÓN', 'Solución', 'SOLUCION', 'Modelo de respuesta', 'MODELO']
-    reminder_keywords = ['Recuerde', 'RECUERDE', 'Recordatorio']
-    
-    for i, line in enumerate(lines):
-        line_stripped = line.strip()
-        
-        if not line_stripped:
+
+    # Find heading indices
+    heading_indices = []  # list of (index, type, original_line)
+    for idx, line in enumerate(lines):
+        for htype, patterns in heading_patterns.items():
+            for pat in patterns:
+                if re.search(pat, line):
+                    heading_indices.append((idx, htype, line))
+                    break
+            else:
+                continue
+            break
+
+    heading_indices.sort(key=lambda x: x[0])
+
+    def slice_section(start_i: int, end_i: int) -> str:
+        return '\n'.join(lines[start_i:end_i]).strip()
+
+    # Map of section -> content
+    sections = {
+        'situation': None,
+        'task': None,
+        'solution': None,
+        'reminders': None
+    }
+
+    # Build segments between headings
+    for i, (idx, htype, line) in enumerate(heading_indices):
+        # Determine content start (allow inline heading like 'SITUACIÓN: text')
+        inline_content = ''
+        if ':' in line:
+            after = line.split(':', 1)[1].strip()
+            if after:
+                inline_content = after
+        content_start = idx + 1 if not inline_content else idx  # if inline content keep same line
+        content_end = heading_indices[i + 1][0] if i + 1 < len(heading_indices) else len(lines)
+        body = slice_section(content_start, content_end)
+        if inline_content:
+            # Prepend inline content (excluding heading token itself)
+            body = inline_content + ('\n' + body if body else '')
+        if sections[htype] is None:
+            sections[htype] = body
+        else:
+            # If repeated heading, append
+            sections[htype] += ('\n' + body if body else '')
+
+    # Heuristics if some sections missing
+    if sections['situation'] is None or sections['task'] is None or sections['solution'] is None:
+        total_lines = len(lines)
+        # Only attempt heuristic if headings sparse (<2 types found)
+        if len({h for _, h, _ in heading_indices}) < 2 and total_lines >= 10:
+            # Split roughly: first 30% situation, next 30% task, final 40% solution
+            a = int(total_lines * 0.30)
+            b = int(total_lines * 0.60)
+            if sections['situation'] is None:
+                sections['situation'] = slice_section(0, a)
+            if sections['task'] is None:
+                sections['task'] = slice_section(a, b)
+            if sections['solution'] is None:
+                sections['solution'] = slice_section(b, total_lines)
+
+    # Extract metadata from entire text
+    word_limit_regexes = [
+        r'\b(\d{2,3})\s*[–-]\s*(\d{2,3})\s*palabras',
+        r'l[ií]mite\s+de\s+\d{2,3}\s*palabras',
+        r'\bentre\s+\d{2,3}\s*y\s+\d{2,3}\s+palabras'
+    ]
+    word_limit = None
+    for wl_pat in word_limit_regexes:
+        m = re.search(wl_pat, raw_text, flags=re.IGNORECASE)
+        if m:
+            word_limit = m.group(0).strip()
+            break
+    if not word_limit:
+        # fallback: any line containing 'palabra'
+        for ln in lines:
+            if 'palabra' in ln.lower():
+                word_limit = ln.strip()
+                break
+
+    text_type = None
+    for ln in lines:
+        if re.search(r'^Tipo\b', ln, flags=re.IGNORECASE) or 'tipo de texto' in ln.lower():
+            if ':' in ln:
+                text_type = ln.split(':', 1)[1].strip() or ln.strip()
+            else:
+                text_type = ln.strip()
+            break
+
+    register = None
+    for ln in lines:
+        if ln.lower().startswith('registro'):
+            if ':' in ln:
+                register = ln.split(':', 1)[1].strip() or ln.strip()
+            else:
+                register = ln.strip()
+            break
+
+    # Reminders: if section already extracted use that; else gather lines beginning with Recuerde
+    reminders = sections['reminders']
+    if not reminders:
+        reminder_lines = [ln for ln in lines if re.match(r'^(Recuerde|RECUERDE|Recordatorio)', ln)]
+        if reminder_lines:
+            reminders = '\n'.join(reminder_lines).strip()
+
+    # Audio URL: detect first plausible URL line
+    audio_url = None
+    url_regex = re.compile(r'https?://\S+|gs://\S+|https?://drive\.google\.com/\S+', re.IGNORECASE)
+    for ln in lines:
+        if url_regex.search(ln):
+            # Accept only if looks like drive or audio file or bucket
+            if any(ext in ln.lower() for ext in ['.mp3', '.wav', 'drive.google', 'docs.google', 'gs://']):
+                audio_url = url_regex.search(ln).group(0)
+                break
+
+    # Title: choose first non-heading, non-metadata medium-length line near top
+    title = None
+    for i, ln in enumerate(lines[:12]):
+        normalized = re.sub(r'[:\s]+$', '', ln)
+        if any(re.search(p, ln) for pats in heading_patterns.values() for p in pats):
             continue
-        
-        # Detect SITUATION section
-        if any(keyword in line_stripped for keyword in situation_keywords):
-            if current_section and section_content:
-                # Save previous section
-                save_section(data, current_section, section_content)
-            current_section = 'situation'
-            section_content = []
-            # Check if situation text is on same line
-            if ':' in line_stripped:
-                content_after_colon = line_stripped.split(':', 1)[1].strip()
-                if content_after_colon:
-                    section_content.append(content_after_colon)
+        if re.search(r'^(Tipo|Registro|Recuerde)', ln, flags=re.IGNORECASE):
             continue
-        
-        # Detect TASK section
-        if any(keyword in line_stripped for keyword in task_keywords):
-            if current_section and section_content:
-                save_section(data, current_section, section_content)
-            current_section = 'task'
-            section_content = []
-            if ':' in line_stripped:
-                content_after_colon = line_stripped.split(':', 1)[1].strip()
-                if content_after_colon:
-                    section_content.append(content_after_colon)
-            continue
-        
-        # Detect SOLUTION section
-        if any(keyword in line_stripped for keyword in solution_keywords):
-            if current_section and section_content:
-                save_section(data, current_section, section_content)
-            current_section = 'solution'
-            section_content = []
-            if ':' in line_stripped:
-                content_after_colon = line_stripped.split(':', 1)[1].strip()
-                if content_after_colon:
-                    section_content.append(content_after_colon)
-            continue
-        
-        # Detect REMINDER section
-        if any(keyword in line_stripped for keyword in reminder_keywords):
-            if current_section and section_content:
-                save_section(data, current_section, section_content)
-            current_section = 'reminder'
-            section_content = []
-            if ':' in line_stripped:
-                content_after_colon = line_stripped.split(':', 1)[1].strip()
-                if content_after_colon:
-                    section_content.append(content_after_colon)
-            continue
-        
-        # Detect metadata fields
-        if 'palabras' in line_stripped.lower() and ('150' in line_stripped or '180' in line_stripped or 'límite' in line_stripped.lower()):
-            data['word_limit'] = line_stripped
-            continue
-        
-        if 'tipo de texto' in line_stripped.lower() or 'tipo:' in line_stripped.lower():
-            data['text_type'] = extract_metadata_value(line_stripped)
-            continue
-        
-        if 'registro' in line_stripped.lower() and len(line_stripped) < 50:
-            data['register'] = extract_metadata_value(line_stripped)
-            continue
-        
-        # Check for title (usually first line or prominent header)
-        if data['title'] is None and len(line_stripped) > 5 and len(line_stripped) < 100:
-            if not any(keyword in line_stripped for keyword in situation_keywords + task_keywords + solution_keywords):
-                if i == 0 or (i < 3 and line_stripped.isupper()):
-                    data['title'] = line_stripped
-                    continue
-        
-        # Add line to current section
-        if current_section:
-            section_content.append(line_stripped)
-    
-    # Save last section
-    if current_section and section_content:
-        save_section(data, current_section, section_content)
-    
+        if 5 <= len(normalized) <= 90:
+            title = ln.strip()
+            break
+
+    data = {
+        'title': title,
+        'situation': sections['situation'],
+        'task_instructions': sections['task'],
+        'word_limit': word_limit,
+        'text_type': text_type,
+        'register': register,
+        'reminders': reminders,
+        'audio_url': audio_url,
+        'solution_text': sections['solution'],
+        'full_raw_text': raw_text,
+        'extraction_report': {
+            'headings_found': heading_indices,
+            'total_lines': len(lines),
+            'sections_missing': [k for k, v in sections.items() if k != 'reminders' and v is None],
+            'word_limit_match': word_limit,
+            'text_type_line': text_type,
+            'register_line': register,
+            'audio_url_line': audio_url,
+            'reminder_present': bool(reminders)
+        }
+    }
+
+    # Fallback if situation/task both empty: assign full text
+    if not data['situation'] and not data['task_instructions']:
+        data['situation'] = raw_text
+
     return data
 
 
