@@ -432,10 +432,6 @@ async def read_root():
                     showResult({error: error.message}, true);
                 }
             }
-                } catch (error) {
-                    showResult({error: error.message}, true);
-                }
-            }
 
             async function checkWritingStatus() {
                 showLoading();
