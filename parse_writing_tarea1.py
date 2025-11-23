@@ -308,11 +308,12 @@ def parse_all_documents(folder_path: str, module_type_id: int = DEFAULT_MODULE_T
                 
                 if dry_run:
                     print(f"  📄 DRY RUN - Parsed successfully")
-                    print(f"     - Title: {data.get('title', 'N/A')[:50]}...")
-                    print(f"     - Situation: {len(data.get('situation', ''))} chars")
-                    print(f"     - Task: {len(data.get('task_instructions', ''))} chars")
-                    print(f"     - Solution: {len(data.get('solution_text', ''))} chars")
-                    print(f"     - Total text: {len(data['full_raw_text'])} chars")
+                    title_preview = (data.get('title') or 'N/A')
+                    print(f"     - Title: {title_preview[:50]}...")
+                    print(f"     - Situation: {len(data.get('situation', '') or '')} chars")
+                    print(f"     - Task: {len(data.get('task_instructions', '') or '')} chars")
+                    print(f"     - Solution: {len(data.get('solution_text', '') or '')} chars")
+                    print(f"     - Total text: {len(data.get('full_raw_text') or '')} chars")
                 else:
                     # Insert into database
                     tarea1_set_id = insert_writing_tarea1(conn, data, module_type_id, filename)
