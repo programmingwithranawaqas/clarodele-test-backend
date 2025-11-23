@@ -232,6 +232,16 @@ async def read_root():
                 🚀 Start Auto-Migration (Tarea5)
             </a>
 
+            <h2>📝 Writing Tasks</h2>
+            
+            <a href="#" class="button" onclick="checkWritingStatus(); return false;">
+                📊 Check Writing Tarea 1 Status
+            </a>
+            
+            <a href="#" class="button secondary" onclick="parseWritingTarea1(); return false;">
+                📝 Parse Writing Tarea 1 Documents
+            </a>
+
             <h2>Available Endpoints</h2>
             
             <div class="endpoint">
@@ -275,6 +285,12 @@ async def read_root():
             </div>
             <div class="endpoint">
                 <strong>GET</strong> /test-gcs - Test GCS bucket access
+            </div>
+            <div class="endpoint">
+                <strong>GET</strong> /writing-tarea1-status - ⭐ Check Writing Tarea 1 parsing status
+            </div>
+            <div class="endpoint">
+                <strong>POST</strong> /parse-writing-tarea1?limit=10 - Parse Writing Tarea 1 documents
             </div>
 
             <h2>Audio Player</h2>
@@ -391,6 +407,34 @@ async def read_root():
                 showLoading();
                 try {
                     const response = await fetch('/start-migration-tarea5');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function checkWritingStatus() {
+                showLoading();
+                try {
+                    const response = await fetch('/writing-tarea1-status');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function parseWritingTarea1() {
+                if (!confirm('Parse all Writing Tarea 1 documents?\\n\\nThis will extract data from .docx files and insert into database.')) {
+                    return;
+                }
+                
+                showLoading();
+                try {
+                    const response = await fetch('/parse-writing-tarea1', {
+                        method: 'POST'
+                    });
                     const data = await response.json();
                     showResult(data);
                 } catch (error) {
@@ -2252,4 +2296,341 @@ async def stream_bucket_audio(blob_path: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ----------------------------------------------------------
+# 📝 WRITING TAREA 1 PARSING ENDPOINTS
+# ----------------------------------------------------------
+
+@app.post("/parse-writing-tarea1")
+async def parse_writing_tarea1_endpoint(
+    limit: Optional[int] = None,
+    module_type_id: int = 1,
+    dry_run: bool = False
+):
+    """
+    Parse Writing Tarea 1 documents and insert into database.
+    
+    Args:
+        limit: Number of documents to process (None = all)
+        module_type_id: Module type ID for the documents
+        dry_run: If True, parse but don't insert into database
+    
+    Returns:
+        Parsing results with success/failure counts
+    """
+    try:
+        from docx import Document
+        
+        folder_path = "Writing_Tarea_1"
+        
+        if not os.path.exists(folder_path):
+            return {
+                "success": False,
+                "error": f"Folder '{folder_path}' not found"
+            }
+        
+        # Get all .docx files
+        files = [f for f in os.listdir(folder_path) if f.endswith('.docx')]
+        files.sort()
+        
+        if limit:
+            files = files[:limit]
+        
+        conn = None if dry_run else get_db_connection()
+        
+        results = {
+            'total': len(files),
+            'successful': 0,
+            'failed': 0,
+            'errors': [],
+            'processed_files': []
+        }
+        
+        try:
+            for idx, filename in enumerate(files, 1):
+                file_path = os.path.join(folder_path, filename)
+                
+                try:
+                    # Parse document
+                    doc = Document(file_path)
+                    full_text = []
+                    
+                    # Extract all text from paragraphs
+                    for para in doc.paragraphs:
+                        text = para.text.strip()
+                        if text:
+                            full_text.append(text)
+                    
+                    # Extract text from tables
+                    for table in doc.tables:
+                        for row in table.rows:
+                            for cell in row.cells:
+                                text = cell.text.strip()
+                                if text:
+                                    full_text.append(text)
+                    
+                    raw_text = '\n'.join(full_text)
+                    
+                    # Parse structured data
+                    data = parse_writing_document(raw_text, filename)
+                    
+                    if dry_run:
+                        results['processed_files'].append({
+                            'file': filename,
+                            'title': data.get('title', 'N/A')[:50],
+                            'situation_chars': len(data.get('situation', '')),
+                            'task_chars': len(data.get('task_instructions', '')),
+                            'solution_chars': len(data.get('solution_text', '')),
+                            'total_chars': len(raw_text)
+                        })
+                    else:
+                        # Insert into database
+                        tarea1_set_id = insert_writing_tarea1_db(conn, data, module_type_id, filename)
+                        results['processed_files'].append({
+                            'file': filename,
+                            'id': tarea1_set_id,
+                            'title': data.get('title', 'N/A')[:50]
+                        })
+                    
+                    results['successful'] += 1
+                    
+                except Exception as e:
+                    results['failed'] += 1
+                    results['errors'].append({
+                        'file': filename,
+                        'error': str(e)
+                    })
+        
+        finally:
+            if conn:
+                conn.close()
+        
+        return {
+            "success": True,
+            "message": f"Processed {results['successful']} of {results['total']} files",
+            "results": results,
+            "dry_run": dry_run
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+def parse_writing_document(text: str, filename: str) -> dict:
+    """Parse writing document text into structured data"""
+    lines = text.split('\n')
+    
+    data = {
+        "title": None,
+        "situation": None,
+        "task_instructions": None,
+        "word_limit": None,
+        "text_type": None,
+        "register": None,
+        "reminders": None,
+        "audio_url": None,
+        "solution_text": None
+    }
+    
+    current_section = None
+    section_content = []
+    
+    situation_keywords = ['SITUACIÓN', 'Situación', 'SITUACION']
+    task_keywords = ['TAREA', 'Tarea', 'INSTRUCCIONES']
+    solution_keywords = ['SOLUCIÓN', 'Solución', 'SOLUCION', 'Modelo de respuesta', 'MODELO']
+    reminder_keywords = ['Recuerde', 'RECUERDE', 'Recordatorio']
+    
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        
+        if not line_stripped:
+            continue
+        
+        # Detect sections
+        if any(keyword in line_stripped for keyword in situation_keywords):
+            if current_section and section_content:
+                save_writing_section(data, current_section, section_content)
+            current_section = 'situation'
+            section_content = []
+            if ':' in line_stripped:
+                content = line_stripped.split(':', 1)[1].strip()
+                if content:
+                    section_content.append(content)
+            continue
+        
+        if any(keyword in line_stripped for keyword in task_keywords):
+            if current_section and section_content:
+                save_writing_section(data, current_section, section_content)
+            current_section = 'task'
+            section_content = []
+            if ':' in line_stripped:
+                content = line_stripped.split(':', 1)[1].strip()
+                if content:
+                    section_content.append(content)
+            continue
+        
+        if any(keyword in line_stripped for keyword in solution_keywords):
+            if current_section and section_content:
+                save_writing_section(data, current_section, section_content)
+            current_section = 'solution'
+            section_content = []
+            if ':' in line_stripped:
+                content = line_stripped.split(':', 1)[1].strip()
+                if content:
+                    section_content.append(content)
+            continue
+        
+        if any(keyword in line_stripped for keyword in reminder_keywords):
+            if current_section and section_content:
+                save_writing_section(data, current_section, section_content)
+            current_section = 'reminder'
+            section_content = []
+            if ':' in line_stripped:
+                content = line_stripped.split(':', 1)[1].strip()
+                if content:
+                    section_content.append(content)
+            continue
+        
+        # Extract metadata
+        if 'palabras' in line_stripped.lower() and ('150' in line_stripped or '180' in line_stripped):
+            data['word_limit'] = line_stripped
+            continue
+        
+        if 'tipo de texto' in line_stripped.lower() or 'tipo:' in line_stripped.lower():
+            if ':' in line_stripped:
+                data['text_type'] = line_stripped.split(':', 1)[1].strip()
+            continue
+        
+        if 'registro' in line_stripped.lower() and len(line_stripped) < 50:
+            if ':' in line_stripped:
+                data['register'] = line_stripped.split(':', 1)[1].strip()
+            continue
+        
+        # Title detection
+        if data['title'] is None and len(line_stripped) > 5 and len(line_stripped) < 100:
+            if i < 3 and not any(k in line_stripped for k in situation_keywords + task_keywords):
+                data['title'] = line_stripped
+                continue
+        
+        # Add to current section
+        if current_section:
+            section_content.append(line_stripped)
+    
+    # Save last section
+    if current_section and section_content:
+        save_writing_section(data, current_section, section_content)
+    
+    # If no structure found, store all in situation
+    if not data['situation'] and not data['task_instructions']:
+        data['situation'] = text
+    
+    return data
+
+
+def save_writing_section(data: dict, section_name: str, content: list):
+    """Save section content to data dictionary"""
+    text = '\n'.join(content).strip()
+    
+    if section_name == 'situation':
+        data['situation'] = text
+    elif section_name == 'task':
+        data['task_instructions'] = text
+    elif section_name == 'solution':
+        data['solution_text'] = text
+    elif section_name == 'reminder':
+        data['reminders'] = text
+
+
+def insert_writing_tarea1_db(conn, data: dict, module_type_id: int, filename: str) -> int:
+    """Insert writing tarea1 data into database"""
+    cursor = conn.cursor()
+    
+    try:
+        # Insert into writing_tarea1_set
+        cursor.execute("""
+            INSERT INTO writing_tarea1_set 
+            (title, situation, task_instructions, word_limit, text_type, register, reminders, audio_url, module_type_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING tarea1_set_id;
+        """, (
+            data.get('title') or filename,
+            data.get('situation'),
+            data.get('task_instructions'),
+            data.get('word_limit'),
+            data.get('text_type'),
+            data.get('register'),
+            data.get('reminders'),
+            data.get('audio_url'),
+            module_type_id
+        ))
+        
+        tarea1_set_id = cursor.fetchone()[0]
+        
+        # Insert solution if exists
+        if data.get('solution_text'):
+            cursor.execute("""
+                INSERT INTO writing_tarea1_solution 
+                (tarea1_set_id, solution_text)
+                VALUES (%s, %s);
+            """, (tarea1_set_id, data.get('solution_text')))
+        
+        conn.commit()
+        return tarea1_set_id
+        
+    except Exception as e:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+
+
+@app.get("/writing-tarea1-status")
+async def get_writing_tarea1_status():
+    """Get status of Writing Tarea 1 parsing"""
+    try:
+        folder_path = "Writing_Tarea_1"
+        
+        # Count files in folder
+        if os.path.exists(folder_path):
+            total_files = len([f for f in os.listdir(folder_path) if f.endswith('.docx')])
+        else:
+            total_files = 0
+        
+        # Count records in database
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_records,
+                COUNT(situation) as with_situation,
+                COUNT(task_instructions) as with_task,
+                COUNT(solution_text) as with_solution
+            FROM writing_tarea1_set wt
+            LEFT JOIN writing_tarea1_solution ws ON wt.tarea1_set_id = ws.tarea1_set_id;
+        """)
+        
+        db_stats = dict(cursor.fetchone())
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "folder": {
+                "total_files": total_files,
+                "folder_exists": os.path.exists(folder_path)
+            },
+            "database": db_stats,
+            "pending": total_files - db_stats['total_records']
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
