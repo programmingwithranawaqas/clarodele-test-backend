@@ -2881,6 +2881,24 @@ async def migrate_audio_files_writing_tarea1(batch_size: int = 10):
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
+        # Check if bucket_url column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        
+        column_exists = cursor.fetchone() is not None
+        
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-writing-tarea1 first."
+            }
+        
         # Get records with audio_url but no bucket_url (or Drive URLs in bucket_url)
         cursor.execute("""
             SELECT tarea1_set_id, audio_url, bucket_url
@@ -2888,10 +2906,10 @@ async def migrate_audio_files_writing_tarea1(batch_size: int = 10):
             WHERE audio_url IS NOT NULL 
             AND (bucket_url IS NULL 
                  OR bucket_url = '' 
-                 OR bucket_url LIKE '%drive.google%' 
-                 OR bucket_url NOT LIKE 'gs://%')
+                 OR bucket_url LIKE %s 
+                 OR bucket_url NOT LIKE %s)
             LIMIT %s;
-        """, (batch_size,))
+        """, ('%drive.google%', 'gs://%', batch_size))
         
         records = cursor.fetchall()
         
