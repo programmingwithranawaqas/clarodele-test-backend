@@ -234,6 +234,7 @@ async def read_root():
 
             <h2>📝 Writing Tasks</h2>
             
+            <h3>Writing Tarea 1</h3>
             <a href="#" class="button" onclick="checkWritingStatus(); return false;">
                 📊 Check Writing Tarea 1 Status
             </a>
@@ -243,11 +244,20 @@ async def read_root():
             </a>
             
             <a href="#" class="button secondary" onclick="addBucketUrlColumn(); return false;">
-                ➕ Add bucket_url Column (if missing)
+                ➕ Add bucket_url Column (Tarea1)
             </a>
             
             <a href="#" class="button secondary" onclick="startMigrationWritingTarea1(); return false;">
                 🚀 Start Audio Migration (Writing Tarea1)
+            </a>
+
+            <h3>Writing Tarea 2</h3>
+            <a href="#" class="button secondary" onclick="addBucketUrlColumnTarea2(); return false;">
+                ➕ Add bucket_url Column (Tarea2)
+            </a>
+            
+            <a href="#" class="button secondary" onclick="startMigrationWritingTarea2(); return false;">
+                🚀 Start Audio Migration (Writing Tarea2)
             </a>
 
             <h2>Available Endpoints</h2>
@@ -447,6 +457,38 @@ async def read_root():
                     const response = await fetch('/add-bucket-url-column-writing-tarea1', {
                         method: 'POST'
                     });
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function addBucketUrlColumnTarea2() {
+                if (!confirm('Add bucket_url column to writing_tarea2_set table?\\n\\nThis is safe to run multiple times.')) {
+                    return;
+                }
+                
+                showLoading();
+                try {
+                    const response = await fetch('/add-bucket-url-column-writing-tarea2', {
+                        method: 'POST'
+                    });
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function startMigrationWritingTarea2() {
+                if (!confirm('Start automatic migration of all Writing Tarea 2 audio files?\\n\\nThis will migrate audio from Google Drive to GCS bucket.')) {
+                    return;
+                }
+                
+                showLoading();
+                try {
+                    const response = await fetch('/start-migration-writing-tarea2');
                     const data = await response.json();
                     showResult(data);
                 } catch (error) {
@@ -3090,5 +3132,289 @@ async def start_auto_migration_writing_tarea1():
             "error": str(e),
             "traceback": traceback.format_exc()
         }
+
+
+# ----------------------------------------------------------
+# 📝 WRITING TAREA 2 AUDIO MIGRATION ENDPOINTS
+# ----------------------------------------------------------
+
+@app.post("/add-bucket-url-column-writing-tarea2")
+async def add_bucket_url_column_writing_tarea2():
+    """
+    Add bucket_url column to writing_tarea2_set table if it doesn't exist.
+    Safe to run multiple times.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea2_set' 
+            AND column_name='bucket_url';
+        """)
+        
+        column_exists = cursor.fetchone() is not None
+        
+        if column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": True,
+                "message": "bucket_url column already exists",
+                "action": "none"
+            }
+        
+        # Add the column
+        cursor.execute("""
+            ALTER TABLE writing_tarea2_set 
+            ADD COLUMN bucket_url TEXT;
+        """)
+        
+        cursor.execute("""
+            COMMENT ON COLUMN writing_tarea2_set.bucket_url 
+            IS 'Google Cloud Storage bucket URL after migration (gs://...)';
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "message": "bucket_url column added successfully",
+            "action": "added"
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.post("/migrate-audio-files-writing-tarea2")
+async def migrate_audio_files_writing_tarea2(batch_size: int = 10):
+    """
+    Migrate audio files from Google Drive to GCS bucket for Writing Tarea 2.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if bucket_url column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea2_set' 
+            AND column_name='bucket_url';
+        """)
+        
+        column_exists = cursor.fetchone() is not None
+        
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-writing-tarea2 first."
+            }
+        
+        # Get records with audio_url but no bucket_url (or Drive URLs in bucket_url)
+        cursor.execute("""
+            SELECT tarea2_set_id, audio_url, bucket_url
+            FROM writing_tarea2_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE %s 
+                 OR bucket_url NOT LIKE %s)
+            LIMIT %s;
+        """, ('%drive.google%', 'gs://%', batch_size))
+        
+        records = cursor.fetchall()
+        
+        if not records:
+            cursor.close()
+            conn.close()
+            return {
+                "success": True,
+                "message": "No files to migrate",
+                "migrated": 0,
+                "failed": 0
+            }
+        
+        migrated = 0
+        failed = 0
+        errors = []
+        
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        
+        for record in records:
+            tarea2_set_id = record['tarea2_set_id']
+            audio_url = record['audio_url']
+            
+            try:
+                # Download from Google Drive
+                file_id = extract_google_drive_id(audio_url)
+                if not file_id:
+                    raise Exception(f"Could not extract file ID from URL: {audio_url}")
+                
+                download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                response = requests.get(download_url, timeout=30)
+                
+                if response.status_code != 200:
+                    raise Exception(f"Failed to download: HTTP {response.status_code}")
+                
+                audio_data = response.content
+                
+                # Upload to GCS bucket
+                blob_name = f"writing_tarea2/{tarea2_set_id}.mp3"
+                blob = bucket.blob(blob_name)
+                blob.upload_from_string(audio_data, content_type='audio/mpeg')
+                
+                gcs_url = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
+                
+                # Update database
+                cursor.execute("""
+                    UPDATE writing_tarea2_set
+                    SET bucket_url = %s
+                    WHERE tarea2_set_id = %s;
+                """, (gcs_url, tarea2_set_id))
+                
+                conn.commit()
+                migrated += 1
+                
+            except Exception as e:
+                failed += 1
+                errors.append({
+                    "id": tarea2_set_id,
+                    "url": audio_url,
+                    "error": str(e)
+                })
+                conn.rollback()
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "migrated": migrated,
+            "failed": failed,
+            "errors": errors[:5]  # Return first 5 errors
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.get("/start-migration-writing-tarea2")
+async def start_auto_migration_writing_tarea2():
+    """
+    Auto-migrate all audio files for Writing Tarea 2.
+    Processes in batches until all files are migrated.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if bucket_url column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='writing_tarea2_set' 
+            AND column_name='bucket_url';
+        """)
+        
+        column_exists = cursor.fetchone() is not None
+        
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-writing-tarea2 first or recreate the tables."
+            }
+        
+        # Count total files to migrate
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM writing_tarea2_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE %s 
+                 OR bucket_url NOT LIKE %s);
+        """, ('%drive.google%', 'gs://%'))
+        
+        result = cursor.fetchone()
+        if not result:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "No result from count query - table may not exist"
+            }
+        
+        total_to_migrate = result['total']
+        cursor.close()
+        conn.close()
+        
+        if total_to_migrate == 0:
+            return {
+                "success": True,
+                "message": "All audio files already migrated",
+                "total": 0,
+                "migrated": 0,
+                "failed": 0
+            }
+        
+        # Process in batches
+        total_migrated = 0
+        total_failed = 0
+        all_errors = []
+        batch_size = 10
+        
+        while True:
+            result = await migrate_audio_files_writing_tarea2(batch_size=batch_size)
+            
+            if not result.get('success'):
+                return result
+            
+            total_migrated += result.get('migrated', 0)
+            total_failed += result.get('failed', 0)
+            all_errors.extend(result.get('errors', []))
+            
+            # Break if no more files to process
+            if result.get('migrated', 0) == 0 and result.get('failed', 0) == 0:
+                break
+        
+        return {
+            "success": True,
+            "message": f"Migration completed for Writing Tarea 2",
+            "total": total_to_migrate,
+            "migrated": total_migrated,
+            "failed": total_failed,
+            "errors": all_errors[:10]  # Return first 10 errors
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
 
 
