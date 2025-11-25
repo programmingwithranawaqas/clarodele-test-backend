@@ -2986,9 +2986,13 @@ async def migrate_audio_files_writing_tarea1(batch_size: int = 10):
                 response = requests.get(download_url, timeout=30)
                 
                 if response.status_code != 200:
-                    raise Exception(f"Failed to download: HTTP {response.status_code}")
+                    raise Exception(f"Failed to download: HTTP {response.status_code}, Response: {response.text[:200]}")
                 
                 audio_data = response.content
+                
+                # Check if content is actually audio (should be at least a few KB)
+                if len(audio_data) < 1000:
+                    raise Exception(f"Downloaded content too small ({len(audio_data)} bytes), might be an error page")
                 
                 # Upload to GCS bucket
                 blob_name = f"writing_tarea1/{tarea1_set_id}.mp3"
@@ -3009,10 +3013,14 @@ async def migrate_audio_files_writing_tarea1(batch_size: int = 10):
                 
             except Exception as e:
                 failed += 1
+                error_msg = str(e)
+                if len(error_msg) > 200:
+                    error_msg = error_msg[:200] + "..."
                 errors.append({
                     "id": tarea1_set_id,
                     "url": audio_url,
-                    "error": str(e)
+                    "file_id": file_id if 'file_id' in locals() else None,
+                    "error": error_msg
                 })
                 conn.rollback()
         
@@ -3137,6 +3145,67 @@ async def start_auto_migration_writing_tarea1():
 # ----------------------------------------------------------
 # 📝 WRITING TAREA 2 AUDIO MIGRATION ENDPOINTS
 # ----------------------------------------------------------
+
+@app.get("/check-failed-migrations-writing-tarea2")
+async def check_failed_migrations_writing_tarea2():
+    """
+    Check which Writing Tarea 2 records have audio_url but no bucket_url.
+    Returns details about failed migrations.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get records with audio_url but no bucket_url
+        cursor.execute("""
+            SELECT tarea2_set_id, audio_url, bucket_url
+            FROM writing_tarea2_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL OR bucket_url = '')
+            LIMIT 50;
+        """)
+        
+        failed_records = cursor.fetchall()
+        
+        # Get total count
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM writing_tarea2_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL OR bucket_url = '');
+        """)
+        
+        total_failed = cursor.fetchone()['total']
+        
+        cursor.close()
+        conn.close()
+        
+        # Test extracting file IDs from URLs
+        results = []
+        for record in failed_records:
+            file_id = extract_google_drive_id(record['audio_url'])
+            results.append({
+                "id": record['tarea2_set_id'],
+                "audio_url": record['audio_url'],
+                "extracted_file_id": file_id,
+                "file_id_extracted": file_id is not None
+            })
+        
+        return {
+            "success": True,
+            "total_failed": total_failed,
+            "showing": len(results),
+            "failed_records": results
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
 
 @app.post("/add-bucket-url-column-writing-tarea2")
 async def add_bucket_url_column_writing_tarea2():
@@ -3269,9 +3338,13 @@ async def migrate_audio_files_writing_tarea2(batch_size: int = 10):
                 response = requests.get(download_url, timeout=30)
                 
                 if response.status_code != 200:
-                    raise Exception(f"Failed to download: HTTP {response.status_code}")
+                    raise Exception(f"Failed to download: HTTP {response.status_code}, Response: {response.text[:200]}")
                 
                 audio_data = response.content
+                
+                # Check if content is actually audio (should be at least a few KB)
+                if len(audio_data) < 1000:
+                    raise Exception(f"Downloaded content too small ({len(audio_data)} bytes), might be an error page")
                 
                 # Upload to GCS bucket
                 blob_name = f"writing_tarea2/{tarea2_set_id}.mp3"
@@ -3292,10 +3365,14 @@ async def migrate_audio_files_writing_tarea2(batch_size: int = 10):
                 
             except Exception as e:
                 failed += 1
+                error_msg = str(e)
+                if len(error_msg) > 200:
+                    error_msg = error_msg[:200] + "..."
                 errors.append({
                     "id": tarea2_set_id,
                     "url": audio_url,
-                    "error": str(e)
+                    "file_id": file_id if 'file_id' in locals() else None,
+                    "error": error_msg
                 })
                 conn.rollback()
         
