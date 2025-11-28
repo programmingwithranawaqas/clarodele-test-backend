@@ -243,35 +243,7 @@ async def read_root():
             <a href="#" class="button secondary" onclick="startMigrationOralTarea1(); return false;">
                 🚀 Start Audio Migration (Oral Tarea1)
             </a>
-                        async function addBucketUrlColumnOralTarea1() {
-                            if (!confirm('Add bucket_url column to oral_tarea1_set table?\n\nThis is safe to run multiple times.')) {
-                                return;
-                            }
-                            showLoading();
-                            try {
-                                const response = await fetch('/add-bucket-url-column-oral-tarea1', {
-                                    method: 'POST'
-                                });
-                                const data = await response.json();
-                                showResult(data);
-                            } catch (error) {
-                                showResult({error: error.message}, true);
-                            }
-                        }
-
-                        async function startMigrationOralTarea1() {
-                            if (!confirm('Start automatic migration of all Oral Tarea 1 audio files?\n\nThis will migrate audio from Google Drive to GCS bucket.')) {
-                                return;
-                            }
-                            showLoading();
-                            try {
-                                const response = await fetch('/start-migration-oral-tarea1');
-                                const data = await response.json();
-                                showResult(data);
-                            } catch (error) {
-                                showResult({error: error.message}, true);
-                            }
-                        }
+            <!-- Oral Tarea 1 JS functions moved to main <script> block below -->
             
             <a href="#" class="button" onclick="checkStatus(); return false;">
                 📊 Check Migration Status
@@ -409,6 +381,48 @@ async def read_root():
                 const resultDiv = document.getElementById('result');
                 resultDiv.className = 'result ' + (isError ? 'error' : 'success');
                 resultDiv.innerHTML = JSON.stringify(data, null, 2);
+            }
+
+            // --------------------------------------------------
+            // Oral Tarea 1 Front-End Actions (migrated to script)
+            // --------------------------------------------------
+            async function addBucketUrlColumnOralTarea1() {
+                if (!confirm('Add bucket_url column to oral_tarea1_set table?\n\nThis is safe to run multiple times.')) {
+                    return;
+                }
+                showLoading();
+                try {
+                    const response = await fetch('/add-bucket-url-column-oral-tarea1', { method: 'POST' });
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({ error: error.message }, true);
+                }
+            }
+
+            async function startMigrationOralTarea1() {
+                if (!confirm('Start automatic migration of all Oral Tarea 1 audio files?\n\nThis will migrate audio from Google Drive to the GCS bucket in batches.')) {
+                    return;
+                }
+                showLoading();
+                try {
+                    const response = await fetch('/start-migration-oral-tarea1');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({ error: error.message }, true);
+                }
+            }
+
+            async function checkFailedMigrationsOralTarea1() {
+                showLoading();
+                try {
+                    const response = await fetch('/check-failed-migrations-oral-tarea1');
+                    const data = await response.json();
+                    showResult(data, !data.success);
+                } catch (error) {
+                    showResult({ error: error.message }, true);
+                }
             }
 
             async function checkStatus() {
