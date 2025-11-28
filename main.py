@@ -2623,117 +2623,138 @@ async def parse_writing_tarea1_endpoint(
 
 
 def parse_writing_document(text: str, filename: str) -> dict:
-    """Parse writing document text into structured data"""
-    lines = text.split('\n')
-    
+    """Parse raw writing tarea document text into structured sections.
+
+    This is a lightweight parser extracting:
+    - title (first non-heading line near top)
+    - situation/context block
+    - task instructions block
+    - solution sample (if present)
+    - reminders (short tips list)
+    Also tries to capture word limit, text type, register.
+    Falls back to storing full text in situation if structure not detected.
+    """
+    lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+
     data = {
-        "title": None,
-        "situation": None,
-        "task_instructions": None,
-        "word_limit": None,
-        "text_type": None
+        'title': None,
+        'situation': None,
+        'task_instructions': None,
+        'solution_text': None,
+        'reminders': None,
+        'word_limit': None,
+        'text_type': None,
+        'register': None,
+        'audio_url': None  # placeholder; populated elsewhere if needed
     }
-        
-        if any(keyword in line_stripped for keyword in solution_keywords):
-            if current_section and section_content:
-                save_writing_section(data, current_section, section_content)
-            current_section = 'solution'
-            section_content = []
-            if ':' in line_stripped:
-                content = line_stripped.split(':', 1)[1].strip()
-                if content:
-                    section_content.append(content)
+
+    # Heading keyword sets (case-insensitive)
+    situation_heads = ['situación', 'situacion', 'contexto', 'situation', 'context']
+    task_heads = ['tarea', 'instrucción', 'instrucciones', 'task', 'instruction', 'instructions']
+    solution_heads = ['solución', 'solucion', 'solution', 'modelo', 'modelo de respuesta', 'respuesta']
+    reminder_heads = ['recuerda', 'recordatorio', 'reminder']
+
+    current = None
+    buffer = []
+
+    def flush():
+        nonlocal buffer, current
+        if not current or not buffer:
+            buffer = []
+            return
+        joined = '\n'.join(buffer).strip()
+        if current == 'situation' and not data['situation']:
+            data['situation'] = joined
+        elif current == 'task' and not data['task_instructions']:
+            data['task_instructions'] = joined
+        elif current == 'solution' and not data['solution_text']:
+            data['solution_text'] = joined
+        elif current == 'reminders' and not data['reminders']:
+            data['reminders'] = joined
+        buffer = []
+
+    for idx, line in enumerate(lines):
+        low = line.lower()
+
+        # Metadata extraction
+        if ('palabras' in low or 'words' in low) and any(n in low for n in ['150', '180']):
+            if not data['word_limit']:
+                data['word_limit'] = line
             continue
-        
-        if any(keyword in line_stripped for keyword in reminder_keywords):
-            if current_section and section_content:
-                save_writing_section(data, current_section, section_content)
-            lines = text.split('\n')
-            data = {
-                "title": None,
-                "situation": None,
-                "task_instructions": None,
-                "word_limit": None,
-                "text_type": None
-            }
-            solution_keywords = ["solución", "solution", "respuesta"]
-            reminder_keywords = ["recuerda", "reminder"]
-            situation_keywords = ["situación", "contexto", "situation", "context"]
-            task_keywords = ["tarea", "task", "instrucción", "instruction"]
-            current_section = None
-            section_content = []
-            for i, line in enumerate(lines):
-                line_stripped = line.strip()
-                if not line_stripped:
-                    continue
-                if any(keyword in line_stripped.lower() for keyword in solution_keywords):
-                    if current_section and section_content:
-                        save_writing_section(data, current_section, section_content)
-                    current_section = 'solution'
-                    section_content = []
-                    if ':' in line_stripped:
-                        content = line_stripped.split(':', 1)[1].strip()
-                        if content:
-                            section_content.append(content)
-                    continue
-                if any(keyword in line_stripped.lower() for keyword in reminder_keywords):
-                    if current_section and section_content:
-                        save_writing_section(data, current_section, section_content)
-                    current_section = 'reminder'
-                    section_content = []
-                    if ':' in line_stripped:
-                        content = line_stripped.split(':', 1)[1].strip()
-                        if content:
-                            section_content.append(content)
-                    continue
-                # Extract metadata
-                if 'palabras' in line_stripped.lower() and ('150' in line_stripped or '180' in line_stripped):
-                    data['word_limit'] = line_stripped
-                    continue
-                if 'tipo de texto' in line_stripped.lower() or 'tipo:' in line_stripped.lower():
-                    if ':' in line_stripped:
-                        data['text_type'] = line_stripped.split(':', 1)[1].strip()
-                    continue
-                if 'registro' in line_stripped.lower() and len(line_stripped) < 50:
-                    if ':' in line_stripped:
-                        data['register'] = line_stripped.split(':', 1)[1].strip()
-                    continue
-                # Title detection
-                if data['title'] is None and len(line_stripped) > 5 and len(line_stripped) < 100:
-                    if i < 3 and not any(k in line_stripped.lower() for k in situation_keywords + task_keywords):
-                        data['title'] = line_stripped
-                        continue
-                # Add to current section
-                if current_section:
-                    section_content.append(line_stripped)
-            # Save last section
-            if current_section and section_content:
-                save_writing_section(data, current_section, section_content)
-            # If no structure found, store all in situation
-            if not data['situation'] and not data['task_instructions']:
-                data['situation'] = text
-            return data
-            data.get('text_type'),
-            data.get('register'),
-            data.get('reminders'),
-            data.get('audio_url'),
-            module_type_id
-        ))
-        
+        if 'tipo de texto' in low or low.startswith('tipo:') or low.startswith('tipo '):
+            if ':' in line:
+                data['text_type'] = line.split(':', 1)[1].strip()
+            else:
+                data['text_type'] = line
+            continue
+        if low.startswith('registro') and ':' in line and not data['register']:
+            data['register'] = line.split(':', 1)[1].strip()
+            continue
+
+        # Heading detection
+        def is_heading(hlist):
+            return any(low.startswith(h) for h in hlist)
+
+        if is_heading(situation_heads):
+            flush(); current = 'situation'; continue
+        if is_heading(task_heads):
+            flush(); current = 'task'; continue
+        if is_heading(solution_heads):
+            flush(); current = 'solution'; continue
+        if is_heading(reminder_heads):
+            flush(); current = 'reminders'; continue
+
+        # Title heuristic (first non-heading line near top)
+        if data['title'] is None and idx < 5 and len(line) > 5 and len(line) < 120:
+            if not any(is_heading(hs) for hs in [situation_heads, task_heads, solution_heads, reminder_heads]):
+                data['title'] = line
+                # Still record line as part of situation if situation starts implicitly
+        buffer.append(line)
+
+    flush()  # flush last section
+
+    # Fallbacks
+    if not data['situation'] and buffer:
+        data['situation'] = '\n'.join(buffer).strip() or text
+    if not data['situation']:
+        data['situation'] = text
+    return data
+
+def insert_writing_tarea1_db(conn, data: dict, module_type_id: int, filename: str) -> int:
+    """Insert parsed writing tarea1 record; returns primary key."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO writing_tarea1_set
+            (title, situation, task_instructions, word_limit, text_type, register, reminders, audio_url, module_type_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING tarea1_set_id;
+            """,
+            (
+                data.get('title') or filename,
+                data.get('situation'),
+                data.get('task_instructions'),
+                data.get('word_limit'),
+                data.get('text_type'),
+                data.get('register'),
+                data.get('reminders'),
+                data.get('audio_url'),
+                module_type_id
+            )
+        )
         tarea1_set_id = cursor.fetchone()[0]
-        
-        # Insert solution if exists
         if data.get('solution_text'):
-            cursor.execute("""
-                INSERT INTO writing_tarea1_solution 
-                (tarea1_set_id, solution_text)
-                VALUES (%s, %s);
-            """, (tarea1_set_id, data.get('solution_text')))
-        
+            cursor.execute(
+                """
+                INSERT INTO writing_tarea1_solution (tarea1_set_id, solution_text)
+                VALUES (%s,%s);
+                """,
+                (tarea1_set_id, data.get('solution_text'))
+            )
         conn.commit()
         return tarea1_set_id
-        
-    except Exception as e:
+    except Exception:
         conn.rollback()
         raise
     finally:
