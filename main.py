@@ -1,124 +1,32 @@
-...existing code...
-            ...existing code...
-            row_id = record['oral_tarea1_set_id']
-            audio_url = record['audio_url']
-            try:
-                file_id = extract_google_drive_id(audio_url)
-                if not file_id:
-                    raise Exception(f"Could not extract file ID from URL: {audio_url}")
-                download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                response = requests.get(download_url, timeout=30)
-                if response.status_code != 200:
-                    raise Exception(f"Failed to download: HTTP {response.status_code}, Response: {response.text[:200]}")
-                audio_data = response.content
-                if len(audio_data) < 1000:
-                    raise Exception(f"Downloaded content too small ({len(audio_data)} bytes), might be an error page")
-                blob_name = f"oral_tarea1/{row_id}.mp3"
-                blob = bucket.blob(blob_name)
-                blob.upload_from_string(audio_data, content_type='audio/mpeg')
-                gcs_url = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
-                cursor.execute("""
-                    UPDATE oral_tarea1_set
-                    SET bucket_url = %s
-                    WHERE oral_tarea1_set_id = %s;
-                """, (gcs_url, row_id))
-                conn.commit()
-                migrated += 1
-            except Exception as e:
-                failed += 1
-                error_msg = str(e)
-                if len(error_msg) > 200:
-                    error_msg = error_msg[:200] + "..."
-                errors.append({"id": row_id, "url": audio_url, "file_id": file_id if 'file_id' in locals() else None, "error": error_msg})
-                conn.rollback()
-        cursor.close()
-        conn.close()
-        return {"success": True, "migrated": migrated, "failed": failed, "errors": errors[:5]}
-    except Exception as e:
-        import traceback
-        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
 
 
-@app.get("/start-migration-oral-tarea1")
-async def start_auto_migration_oral_tarea1():
-    """
-    Auto-migrate all audio files for Oral Tarea 1. Processes in batches until all files are migrated.
-    """
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='oral_tarea1_set' 
-            AND column_name='bucket_url';
-        """)
-        column_exists = cursor.fetchone() is not None
-        if not column_exists:
-            cursor.close()
-            conn.close()
-            return {"success": False, "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-oral-tarea1 first or recreate the tables."}
-        cursor.execute("""
-            SELECT COUNT(*) as total
-            FROM oral_tarea1_set
-            WHERE audio_url IS NOT NULL 
-            AND (bucket_url IS NULL 
-                 OR bucket_url = '' 
-                 OR bucket_url LIKE %s 
-                 OR bucket_url NOT LIKE %s);
-        """, ('%drive.google%', 'gs://%'))
-        result = cursor.fetchone()
-        if not result:
-            cursor.close()
-            conn.close()
-            return {"success": False, "error": "No result from count query - table may not exist"}
-        total_to_migrate = result['total']
-        cursor.close()
-        conn.close()
-        if total_to_migrate == 0:
-            return {"success": True, "message": "All audio files already migrated", "total": 0, "migrated": 0, "failed": 0}
-        total_migrated = 0
-        total_failed = 0
-        all_errors = []
-        batch_size = 10
-        while True:
-            result = await migrate_audio_files_oral_tarea1(batch_size=batch_size)
-            if not result.get('success'):
-                return result
-            total_migrated += result.get('migrated', 0)
-            total_failed += result.get('failed', 0)
-            all_errors.extend(result.get('errors', []))
-            if result.get('migrated', 0) == 0 and result.get('failed', 0) == 0:
-                break
-        return {"success": True, "message": f"Migration completed for Oral Tarea 1", "total": total_to_migrate, "migrated": total_migrated, "failed": total_failed, "errors": all_errors[:10]}
-    except Exception as e:
-        import traceback
-        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse
+from google.cloud import storage
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import requests
+import os
+import tempfile
+from typing import Optional
+from urllib.parse import unquote
+import re
 
+app = FastAPI(title="Audio Migration API", version="1.0.0")
 
-@app.get("/check-failed-migrations-oral-tarea1")
-async def check_failed_migrations_oral_tarea1():
-    """
-    Check which Oral Tarea 1 records have audio_url but no bucket_url. Returns details about failed migrations.
-    """
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT oral_tarea1_set_id, audio_url, bucket_url
-            FROM oral_tarea1_set
-            WHERE audio_url IS NOT NULL 
-            AND (bucket_url IS NULL OR bucket_url = '' OR bucket_url LIKE '%drive.google%' OR bucket_url NOT LIKE 'gs://%')
-            ORDER BY oral_tarea1_set_id;
-        """)
-        records = cursor.fetchall()
-        for rec in records:
-            rec["file_id"] = extract_google_drive_id(rec["audio_url"]) if rec["audio_url"] else None
-        cursor.close()
-        conn.close()
-        return {"success": True, "count": len(records), "failed": records}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+# Database configuration
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:%40%21ceXpert%2C9%2F11@db.ycnqrnacilcwqqgelaod.supabase.co:5432/postgres?sslmode=require"
+)
+
+# Supabase configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://ycnqrnacilcwqqgelaod.supabase.co")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")  # You'll need to provide this
+BUCKET_NAME = os.getenv("BUCKET_NAME", "audio-files")  # Default bucket name
+
+# GCS Bucket name
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "clarodele-mvp-content")
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from google.cloud import storage
@@ -2723,8 +2631,8 @@ def parse_writing_document(text: str, filename: str) -> dict:
         "situation": None,
         "task_instructions": None,
         "word_limit": None,
-        "text_type": None,
-            continue
+        "text_type": None
+    }
         
         if any(keyword in line_stripped for keyword in solution_keywords):
             if current_section and section_content:
@@ -2740,80 +2648,71 @@ def parse_writing_document(text: str, filename: str) -> dict:
         if any(keyword in line_stripped for keyword in reminder_keywords):
             if current_section and section_content:
                 save_writing_section(data, current_section, section_content)
-            current_section = 'reminder'
+            lines = text.split('\n')
+            data = {
+                "title": None,
+                "situation": None,
+                "task_instructions": None,
+                "word_limit": None,
+                "text_type": None
+            }
+            solution_keywords = ["solución", "solution", "respuesta"]
+            reminder_keywords = ["recuerda", "reminder"]
+            situation_keywords = ["situación", "contexto", "situation", "context"]
+            task_keywords = ["tarea", "task", "instrucción", "instruction"]
+            current_section = None
             section_content = []
-            if ':' in line_stripped:
-                content = line_stripped.split(':', 1)[1].strip()
-                if content:
-                    section_content.append(content)
-            continue
-        
-        # Extract metadata
-        if 'palabras' in line_stripped.lower() and ('150' in line_stripped or '180' in line_stripped):
-            data['word_limit'] = line_stripped
-            continue
-        
-        if 'tipo de texto' in line_stripped.lower() or 'tipo:' in line_stripped.lower():
-            if ':' in line_stripped:
-                data['text_type'] = line_stripped.split(':', 1)[1].strip()
-            continue
-        
-        if 'registro' in line_stripped.lower() and len(line_stripped) < 50:
-            if ':' in line_stripped:
-                data['register'] = line_stripped.split(':', 1)[1].strip()
-            continue
-        
-        # Title detection
-        if data['title'] is None and len(line_stripped) > 5 and len(line_stripped) < 100:
-            if i < 3 and not any(k in line_stripped for k in situation_keywords + task_keywords):
-                data['title'] = line_stripped
-                continue
-        
-        # Add to current section
-        if current_section:
-            section_content.append(line_stripped)
-    
-    # Save last section
-    if current_section and section_content:
-        save_writing_section(data, current_section, section_content)
-    
-    # If no structure found, store all in situation
-    if not data['situation'] and not data['task_instructions']:
-        data['situation'] = text
-    
-    return data
-
-
-def save_writing_section(data: dict, section_name: str, content: list):
-    """Save section content to data dictionary"""
-    text = '\n'.join(content).strip()
-    
-    if section_name == 'situation':
-        data['situation'] = text
-    elif section_name == 'task':
-        data['task_instructions'] = text
-    elif section_name == 'solution':
-        data['solution_text'] = text
-    elif section_name == 'reminder':
-        data['reminders'] = text
-
-
-def insert_writing_tarea1_db(conn, data: dict, module_type_id: int, filename: str) -> int:
-    """Insert writing tarea1 data into database"""
-    cursor = conn.cursor()
-    
-    try:
-        # Insert into writing_tarea1_set
-        cursor.execute("""
-            INSERT INTO writing_tarea1_set 
-            (title, situation, task_instructions, word_limit, text_type, register, reminders, audio_url, module_type_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING tarea1_set_id;
-        """, (
-            data.get('title') or filename,
-            data.get('situation'),
-            data.get('task_instructions'),
-            data.get('word_limit'),
+            for i, line in enumerate(lines):
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                if any(keyword in line_stripped.lower() for keyword in solution_keywords):
+                    if current_section and section_content:
+                        save_writing_section(data, current_section, section_content)
+                    current_section = 'solution'
+                    section_content = []
+                    if ':' in line_stripped:
+                        content = line_stripped.split(':', 1)[1].strip()
+                        if content:
+                            section_content.append(content)
+                    continue
+                if any(keyword in line_stripped.lower() for keyword in reminder_keywords):
+                    if current_section and section_content:
+                        save_writing_section(data, current_section, section_content)
+                    current_section = 'reminder'
+                    section_content = []
+                    if ':' in line_stripped:
+                        content = line_stripped.split(':', 1)[1].strip()
+                        if content:
+                            section_content.append(content)
+                    continue
+                # Extract metadata
+                if 'palabras' in line_stripped.lower() and ('150' in line_stripped or '180' in line_stripped):
+                    data['word_limit'] = line_stripped
+                    continue
+                if 'tipo de texto' in line_stripped.lower() or 'tipo:' in line_stripped.lower():
+                    if ':' in line_stripped:
+                        data['text_type'] = line_stripped.split(':', 1)[1].strip()
+                    continue
+                if 'registro' in line_stripped.lower() and len(line_stripped) < 50:
+                    if ':' in line_stripped:
+                        data['register'] = line_stripped.split(':', 1)[1].strip()
+                    continue
+                # Title detection
+                if data['title'] is None and len(line_stripped) > 5 and len(line_stripped) < 100:
+                    if i < 3 and not any(k in line_stripped.lower() for k in situation_keywords + task_keywords):
+                        data['title'] = line_stripped
+                        continue
+                # Add to current section
+                if current_section:
+                    section_content.append(line_stripped)
+            # Save last section
+            if current_section and section_content:
+                save_writing_section(data, current_section, section_content)
+            # If no structure found, store all in situation
+            if not data['situation'] and not data['task_instructions']:
+                data['situation'] = text
+            return data
             data.get('text_type'),
             data.get('register'),
             data.get('reminders'),
@@ -3611,3 +3510,205 @@ async def start_auto_migration_writing_tarea2():
 
 
 
+
+
+
+# ...existing code...
+
+# Place all oral_tarea1 related endpoints and helpers at the end of the file
+
+# ----------------------------------------------------------
+# ORAL TAREA 1 AUDIO MIGRATION ENDPOINTS (moved to end)
+# ----------------------------------------------------------
+
+@app.post("/add-bucket-url-column-oral-tarea1")
+async def add_bucket_url_column_oral_tarea1():
+    """
+    Add bucket_url column to oral_tarea1_set table if it doesn't exist. Safe to run multiple times.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='oral_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        column_exists = cursor.fetchone() is not None
+        if column_exists:
+            cursor.close()
+            conn.close()
+            return {"success": True, "message": "bucket_url column already exists", "action": "none"}
+        cursor.execute("""
+            ALTER TABLE oral_tarea1_set 
+            ADD COLUMN bucket_url TEXT;
+        """)
+        cursor.execute("""
+            COMMENT ON COLUMN oral_tarea1_set.bucket_url 
+            IS 'Google Cloud Storage bucket URL after migration (gs://...)';
+        """)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"success": True, "message": "bucket_url column added successfully", "action": "added"}
+    except Exception as e:
+        import traceback
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+
+async def migrate_audio_files_oral_tarea1(batch_size: int = 10):
+    """
+    Migrate audio files from Google Drive to GCS bucket for Oral Tarea 1.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='oral_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        column_exists = cursor.fetchone() is not None
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-oral-tarea1 first."}
+        cursor.execute("""
+            SELECT oral_tarea1_set_id, audio_url, bucket_url
+            FROM oral_tarea1_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE %s 
+                 OR bucket_url NOT LIKE %s)
+            LIMIT %s;
+        """, ('%drive.google%', 'gs://%', batch_size))
+        records = cursor.fetchall()
+        if not records:
+            cursor.close()
+            conn.close()
+            return {"success": True, "message": "No files to migrate", "migrated": 0, "failed": 0}
+        migrated = 0
+        failed = 0
+        errors = []
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        for record in records:
+            row_id = record['oral_tarea1_set_id']
+            audio_url = record['audio_url']
+            try:
+                file_id = extract_google_drive_id(audio_url)
+                if not file_id:
+                    raise Exception(f"Could not extract file ID from URL: {audio_url}")
+                download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                response = requests.get(download_url, timeout=30)
+                if response.status_code != 200:
+                    raise Exception(f"Failed to download: HTTP {response.status_code}, Response: {response.text[:200]}")
+                audio_data = response.content
+                if len(audio_data) < 1000:
+                    raise Exception(f"Downloaded content too small ({len(audio_data)} bytes), might be an error page")
+                blob_name = f"oral_tarea1/{row_id}.mp3"
+                blob = bucket.blob(blob_name)
+                blob.upload_from_string(audio_data, content_type='audio/mpeg')
+                gcs_url = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
+                cursor.execute("""
+                    UPDATE oral_tarea1_set
+                    SET bucket_url = %s
+                    WHERE oral_tarea1_set_id = %s;
+                """, (gcs_url, row_id))
+                conn.commit()
+                migrated += 1
+            except Exception as e:
+                failed += 1
+                error_msg = str(e)
+                if len(error_msg) > 200:
+                    error_msg = error_msg[:200] + "..."
+                errors.append({"id": row_id, "url": audio_url, "file_id": file_id if 'file_id' in locals() else None, "error": error_msg})
+                conn.rollback()
+        cursor.close()
+        conn.close()
+        return {"success": True, "migrated": migrated, "failed": failed, "errors": errors[:5]}
+    except Exception as e:
+        import traceback
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+
+@app.get("/check-failed-migrations-oral-tarea1")
+async def check_failed_migrations_oral_tarea1():
+    """
+    Check which Oral Tarea 1 records have audio_url but no bucket_url. Returns details about failed migrations.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT oral_tarea1_set_id, audio_url, bucket_url
+            FROM oral_tarea1_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL OR bucket_url = '' OR bucket_url LIKE '%drive.google%' OR bucket_url NOT LIKE 'gs://%')
+            ORDER BY oral_tarea1_set_id;
+        """)
+        records = cursor.fetchall()
+        for rec in records:
+            rec["file_id"] = extract_google_drive_id(rec["audio_url"]) if rec["audio_url"] else None
+        cursor.close()
+        conn.close()
+        return {"success": True, "count": len(records), "failed": records}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/start-migration-oral-tarea1")
+async def start_auto_migration_oral_tarea1():
+    """
+    Auto-migrate all audio files for Oral Tarea 1. Processes in batches until all files are migrated.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='oral_tarea1_set' 
+            AND column_name='bucket_url';
+        """)
+        column_exists = cursor.fetchone() is not None
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-oral-tarea1 first or recreate the tables."}
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM oral_tarea1_set
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE %s 
+                 OR bucket_url NOT LIKE %s);
+        """, ('%drive.google%', 'gs://%'))
+        result = cursor.fetchone()
+        if not result:
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": "No result from count query - table may not exist"}
+        total_to_migrate = result['total']
+        cursor.close()
+        conn.close()
+        if total_to_migrate == 0:
+            return {"success": True, "message": "All audio files already migrated", "total": 0, "migrated": 0, "failed": 0}
+        total_migrated = 0
+        total_failed = 0
+        all_errors = []
+        batch_size = 10
+        while True:
+            result = await migrate_audio_files_oral_tarea1(batch_size=batch_size)
+            if not result.get('success'):
+                return result
+            total_migrated += result.get('migrated', 0)
+            total_failed += result.get('failed', 0)
+            all_errors.extend(result.get('errors', []))
+            if result.get('migrated', 0) == 0 and result.get('failed', 0) == 0:
+                break
+        return {"success": True, "message": f"Migration completed for Oral Tarea 1", "total": total_to_migrate, "migrated": total_migrated, "failed": total_failed, "errors": all_errors[:10]}
+    except Exception as e:
+        import traceback
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
