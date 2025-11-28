@@ -243,6 +243,9 @@ async def read_root():
             <a href="#" class="button secondary" onclick="startMigrationOralTarea1(); return false;">
                 🚀 Start Audio Migration (Oral Tarea1)
             </a>
+            <a href="#" class="button" onclick="checkFailedMigrationsOralTarea1(); return false;">
+                ❌ Check Failed Migrations (Oral Tarea1)
+            </a>
             <!-- Oral Tarea 1 JS functions moved to main <script> block below -->
             
             <a href="#" class="button" onclick="checkStatus(); return false;">
