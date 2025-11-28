@@ -328,13 +328,13 @@ async def read_root():
             </div>
 
             <h2>Quick Actions</h2>
-                    <h3>Oral Tarea 1</h3>
-                    <a href="#" class="button" onclick="addBucketUrlColumnOralTarea1(); return false;">
-                        ➕ Add bucket_url Column (Oral Tarea1)
-                    </a>
-                    <a href="#" class="button secondary" onclick="startMigrationOralTarea1(); return false;">
-                        🚀 Start Audio Migration (Oral Tarea1)
-                    </a>
+            <h3>Oral Tarea 1</h3>
+            <a href="#" class="button" onclick="addBucketUrlColumnOralTarea1(); return false;">
+                ➕ Add bucket_url Column (Oral Tarea1)
+            </a>
+            <a href="#" class="button secondary" onclick="startMigrationOralTarea1(); return false;">
+                🚀 Start Audio Migration (Oral Tarea1)
+            </a>
                         async function addBucketUrlColumnOralTarea1() {
                             if (!confirm('Add bucket_url column to oral_tarea1_set table?\n\nThis is safe to run multiple times.')) {
                                 return;
