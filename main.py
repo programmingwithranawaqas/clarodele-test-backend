@@ -403,6 +403,8 @@ async def read_root():
                 }
             }
 
+            window.addBucketUrlColumnOralTarea1 = addBucketUrlColumnOralTarea1;
+
             async function startMigrationOralTarea1() {
                 if (!confirm('Start automatic migration of all Oral Tarea 1 audio files?\n\nThis will migrate audio from Google Drive to the GCS bucket in batches.')) {
                     return;
@@ -417,6 +419,8 @@ async def read_root():
                 }
             }
 
+            window.startMigrationOralTarea1 = startMigrationOralTarea1;
+
             async function checkFailedMigrationsOralTarea1() {
                 showLoading();
                 try {
@@ -427,6 +431,8 @@ async def read_root():
                     showResult({ error: error.message }, true);
                 }
             }
+
+            window.checkFailedMigrationsOralTarea1 = checkFailedMigrationsOralTarea1;
 
             async function checkStatus() {
                 showLoading();
