@@ -3579,7 +3579,7 @@ async def migrate_audio_files_oral_tarea1(batch_size: int = 10):
             conn.close()
             return {"success": False, "error": "bucket_url column does not exist. Please run POST /add-bucket-url-column-oral-tarea1 first."}
         cursor.execute("""
-            SELECT oral_tarea1_set_id, audio_url, bucket_url
+            SELECT tarea1_set_id, audio_url, bucket_url
             FROM oral_tarea1_set
             WHERE audio_url IS NOT NULL 
             AND (bucket_url IS NULL 
@@ -3599,7 +3599,7 @@ async def migrate_audio_files_oral_tarea1(batch_size: int = 10):
         storage_client = storage.Client()
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         for record in records:
-            row_id = record['oral_tarea1_set_id']
+            row_id = record['tarea1_set_id']
             audio_url = record['audio_url']
             try:
                 file_id = extract_google_drive_id(audio_url)
@@ -3619,7 +3619,7 @@ async def migrate_audio_files_oral_tarea1(batch_size: int = 10):
                 cursor.execute("""
                     UPDATE oral_tarea1_set
                     SET bucket_url = %s
-                    WHERE oral_tarea1_set_id = %s;
+                    WHERE tarea1_set_id = %s;
                 """, (gcs_url, row_id))
                 conn.commit()
                 migrated += 1
@@ -3646,11 +3646,11 @@ async def check_failed_migrations_oral_tarea1():
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT oral_tarea1_set_id, audio_url, bucket_url
+            SELECT tarea1_set_id, audio_url, bucket_url
             FROM oral_tarea1_set
             WHERE audio_url IS NOT NULL 
             AND (bucket_url IS NULL OR bucket_url = '' OR bucket_url LIKE '%drive.google%' OR bucket_url NOT LIKE 'gs://%')
-            ORDER BY oral_tarea1_set_id;
+            ORDER BY tarea1_set_id;
         """)
         records = cursor.fetchall()
         for rec in records:
@@ -3677,14 +3677,14 @@ def oral_tarea1_migrate():
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT oral_tarea1_set_id, audio_url FROM oral_tarea1_set
+            SELECT tarea1_set_id, audio_url FROM oral_tarea1_set
             WHERE audio_url IS NOT NULL AND (bucket_url IS NULL OR bucket_url = '' OR bucket_url LIKE '%drive.google%' OR bucket_url NOT LIKE 'gs://%')
         """)
         rows = cursor.fetchall()
         storage_client = storage.Client()
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         for row in rows:
-            row_id = row['oral_tarea1_set_id']
+            row_id = row['tarea1_set_id']
             audio_url = row['audio_url']
             try:
                 file_id = extract_google_drive_id(audio_url)
@@ -3702,7 +3702,7 @@ def oral_tarea1_migrate():
                 blob.upload_from_string(audio_data, content_type='audio/mpeg')
                 gcs_url = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
                 cursor.execute("""
-                    UPDATE oral_tarea1_set SET bucket_url = %s WHERE oral_tarea1_set_id = %s;
+                    UPDATE oral_tarea1_set SET bucket_url = %s WHERE tarea1_set_id = %s;
                 """, (gcs_url, row_id))
                 conn.commit()
                 migrated += 1
