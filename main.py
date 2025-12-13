@@ -293,6 +293,25 @@ async def read_root():
                 🚀 Start Audio Migration (Writing Tarea2)
             </a>
 
+            <h2>🎤 Oral Tasks</h2>
+            
+            <h3>Oral Tarea 2</h3>
+            <a href="#" class="button" onclick="checkOralTarea2Status(); return false;">
+                📊 Check Oral Tarea 2 Status
+            </a>
+            
+            <a href="#" class="button secondary" onclick="verifyBucketUrlColumnOralTarea2(); return false;">
+                ✓ Verify bucket_url Column (Oral Tarea2)
+            </a>
+            
+            <a href="#" class="button secondary" onclick="startMigrationOralTarea2(); return false;">
+                🚀 Start Audio Migration (Oral Tarea2)
+            </a>
+            
+            <a href="#" class="button secondary" onclick="checkFailedOralTarea2(); return false;">
+                ❌ Check Failed Migrations (Oral Tarea2)
+            </a>
+
             <h2>Available Endpoints</h2>
             
             <div class="endpoint">
@@ -537,6 +556,58 @@ async def read_root():
                 showLoading();
                 try {
                     const response = await fetch('/start-migration-writing-tarea2');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function checkOralTarea2Status() {
+                showLoading();
+                try {
+                    const response = await fetch('/check-failed-migrations-oral-tarea2');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function verifyBucketUrlColumnOralTarea2() {
+                showLoading();
+                try {
+                    const response = await fetch('/add-bucket-url-column-oral-tarea2', {
+                        method: 'POST'
+                    });
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function startMigrationOralTarea2() {
+                if (!confirm('Start automatic migration of all Oral Tarea 2 audio files?\\n\\nThis will migrate 100 audio files from Google Drive to GCS bucket.\\n\\nPlease ensure you are running this on Cloud Run with proper credentials.')) {
+                    return;
+                }
+                
+                showLoading();
+                document.getElementById('result').innerHTML = '<div class="result">🔄 Migrating Oral Tarea 2 audio files... This may take several minutes...</div>';
+                
+                try {
+                    const response = await fetch('/start-migration-oral-tarea2');
+                    const data = await response.json();
+                    showResult(data);
+                } catch (error) {
+                    showResult({error: error.message}, true);
+                }
+            }
+
+            async function checkFailedOralTarea2() {
+                showLoading();
+                try {
+                    const response = await fetch('/check-failed-migrations-oral-tarea2');
                     const data = await response.json();
                     showResult(data);
                 } catch (error) {
@@ -3717,3 +3788,302 @@ def oral_tarea1_migrate():
     finally:
         if conn:
             conn.close()
+
+
+# ----------------------------------------------------------
+# ORAL TAREA 2 AUDIO MIGRATION ENDPOINTS
+# ----------------------------------------------------------
+
+@app.post("/add-bucket-url-column-oral-tarea2")
+async def add_bucket_url_column_oral_tarea2():
+    """
+    Verify that bucket_url column exists in oral_tarea2_solution table.
+    (It should already exist based on schema, but this endpoint checks it)
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='oral_tarea2_solution' 
+            AND column_name='bucket_url';
+        """)
+        column_exists = cursor.fetchone() is not None
+        cursor.close()
+        conn.close()
+        
+        if column_exists:
+            return {"success": True, "message": "bucket_url column already exists in oral_tarea2_solution", "action": "none"}
+        else:
+            return {"success": False, "message": "bucket_url column does NOT exist in oral_tarea2_solution. Please check your schema.", "action": "missing"}
+    except Exception as e:
+        import traceback
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+
+
+@app.post("/migrate-audio-files-oral-tarea2")
+async def migrate_audio_files_oral_tarea2(batch_size: int = 10):
+    """
+    Migrate audio files from Google Drive to GCS bucket for Oral Tarea 2.
+    Note: audio_url and bucket_url are in oral_tarea2_solution table.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if bucket_url column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='oral_tarea2_solution' 
+            AND column_name='bucket_url';
+        """)
+        column_exists = cursor.fetchone() is not None
+        
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "bucket_url column does not exist in oral_tarea2_solution table. Please check your schema."
+            }
+        
+        # Get records to migrate
+        cursor.execute("""
+            SELECT solution_id, tarea2_set_id, audio_url, bucket_url
+            FROM oral_tarea2_solution
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE %s 
+                 OR bucket_url NOT LIKE %s)
+            LIMIT %s;
+        """, ('%drive.google%', 'gs://%', batch_size))
+        
+        records = cursor.fetchall()
+        
+        if not records:
+            cursor.close()
+            conn.close()
+            return {
+                "success": True,
+                "message": "No files to migrate",
+                "migrated": 0,
+                "failed": 0
+            }
+        
+        migrated = 0
+        failed = 0
+        errors = []
+        
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        
+        for record in records:
+            solution_id = record['solution_id']
+            tarea2_set_id = record['tarea2_set_id']
+            audio_url = record['audio_url']
+            
+            try:
+                file_id = extract_google_drive_id(audio_url)
+                if not file_id:
+                    raise Exception(f"Could not extract file ID from URL: {audio_url}")
+                
+                download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                response = requests.get(download_url, timeout=30)
+                
+                if response.status_code != 200:
+                    raise Exception(f"Failed to download: HTTP {response.status_code}")
+                
+                audio_data = response.content
+                if len(audio_data) < 1000:
+                    raise Exception(f"Downloaded content too small ({len(audio_data)} bytes)")
+                
+                # Use tarea2_set_id for the blob name
+                blob_name = f"oral_tarea2/{tarea2_set_id}.mp3"
+                blob = bucket.blob(blob_name)
+                blob.upload_from_string(audio_data, content_type='audio/mpeg')
+                
+                gcs_url = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
+                
+                # Update oral_tarea2_solution table
+                cursor.execute("""
+                    UPDATE oral_tarea2_solution
+                    SET bucket_url = %s
+                    WHERE solution_id = %s;
+                """, (gcs_url, solution_id))
+                
+                conn.commit()
+                migrated += 1
+                
+            except Exception as e:
+                failed += 1
+                error_msg = str(e)
+                if len(error_msg) > 200:
+                    error_msg = error_msg[:200] + "..."
+                errors.append({
+                    "solution_id": solution_id,
+                    "tarea2_set_id": tarea2_set_id,
+                    "url": audio_url,
+                    "error": error_msg
+                })
+                conn.rollback()
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "migrated": migrated,
+            "failed": failed,
+            "errors": errors[:5]
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.get("/start-migration-oral-tarea2")
+async def start_auto_migration_oral_tarea2():
+    """
+    Auto-migrate all audio files for Oral Tarea 2.
+    Processes in batches until all files are migrated.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if bucket_url column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='oral_tarea2_solution' 
+            AND column_name='bucket_url';
+        """)
+        
+        column_exists = cursor.fetchone() is not None
+        
+        if not column_exists:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "bucket_url column does not exist in oral_tarea2_solution. Please check your schema."
+            }
+        
+        # Count total files to migrate
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM oral_tarea2_solution
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE %s 
+                 OR bucket_url NOT LIKE %s);
+        """, ('%drive.google%', 'gs://%'))
+        
+        result = cursor.fetchone()
+        if not result:
+            cursor.close()
+            conn.close()
+            return {
+                "success": False,
+                "error": "No result from count query - table may not exist"
+            }
+        
+        total_to_migrate = result['total']
+        cursor.close()
+        conn.close()
+        
+        if total_to_migrate == 0:
+            return {
+                "success": True,
+                "message": "All audio files already migrated for Oral Tarea 2",
+                "total": 0,
+                "migrated": 0,
+                "failed": 0
+            }
+        
+        # Process in batches
+        total_migrated = 0
+        total_failed = 0
+        all_errors = []
+        batch_size = 10
+        
+        while True:
+            result = await migrate_audio_files_oral_tarea2(batch_size=batch_size)
+            
+            if not result.get('success'):
+                return result
+            
+            total_migrated += result.get('migrated', 0)
+            total_failed += result.get('failed', 0)
+            all_errors.extend(result.get('errors', []))
+            
+            # Break if no more files to process
+            if result.get('migrated', 0) == 0 and result.get('failed', 0) == 0:
+                break
+        
+        return {
+            "success": True,
+            "message": f"Migration completed for Oral Tarea 2",
+            "total": total_to_migrate,
+            "migrated": total_migrated,
+            "failed": total_failed,
+            "errors": all_errors[:10]  # Return first 10 errors
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.get("/check-failed-migrations-oral-tarea2")
+async def check_failed_migrations_oral_tarea2():
+    """
+    Check which Oral Tarea 2 records have audio_url but no bucket_url.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT solution_id, tarea2_set_id, audio_url, bucket_url
+            FROM oral_tarea2_solution
+            WHERE audio_url IS NOT NULL 
+            AND (bucket_url IS NULL 
+                 OR bucket_url = '' 
+                 OR bucket_url LIKE '%drive.google%' 
+                 OR bucket_url NOT LIKE 'gs://%')
+            ORDER BY solution_id;
+        """)
+        
+        records = cursor.fetchall()
+        
+        for rec in records:
+            rec["file_id"] = extract_google_drive_id(rec["audio_url"]) if rec["audio_url"] else None
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "count": len(records),
+            "failed": records
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
